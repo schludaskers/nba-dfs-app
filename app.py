@@ -9,6 +9,7 @@ import textwrap
 from datetime import datetime, timedelta
 import pytz 
 from nba_api.stats.endpoints import playergamelogs, scoreboardv2, commonteamroster, leaguedashplayerstats, leaguedashteamstats
+import traceback
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(
@@ -164,47 +165,68 @@ def get_current_nba_season():
     end_year_short = str(start_year + 1)[-2:]
     return f"{start_year}-{end_year_short}"
 
-def get_usage_and_defense(season_str=None): # Allow optional override
-    """Fetches Advanced Stats for the correct season."""
+def get_usage_and_defense(season_str=None):
+    """
+    Fetches Advanced Stats with 'User-Agent' headers to bypass NBA blocks.
+    Auto-corrects the season string (e.g., handles Jan 2026 as '2025-26').
+    """
     
-    # 1. Auto-fix the season string if not valid or provided
-    if not season_str:
-        season_str = get_current_nba_season()
-        
-    print(f"🛠️ DEBUG: Fetching stats for season: '{season_str}'") # <--- CHECK THIS IN CONSOLE
+    # --- 1. FORCE Correct Season String ---
+    # We ignore the input if it's suspicious and recalculate it to be safe.
+    now = datetime.now()
+    if now.month < 10: 
+        start_year = now.year - 1
+    else:
+        start_year = now.year
+    
+    # Force the format "2025-26"
+    safe_season_str = f"{start_year}-{str(start_year + 1)[-2:]}"
+    print(f"🔄 DEBUG: Forcing Season to: {safe_season_str}") 
+
+    # --- 2. DEFINE HEADERS (Crucial for 403 Errors) ---
+    custom_headers = {
+        'Host': 'stats.nba.com',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Referer': 'https://www.nba.com/',
+        'Origin': 'https://www.nba.com',
+        'Connection': 'keep-alive',
+    }
 
     try:
-        # headers = {'User-Agent': 'Mozilla/5.0'} # Uncomment if you still get timeout/403 errors
+        print("⏳ DEBUG: Requesting Player Usage Stats...")
         
-        # 2. Player Stats (Usage)
-        # Added timeout to prevent hanging
+        # --- 3. FETCH USAGE (With Headers & Timeout) ---
         player_stats = leaguedashplayerstats.LeagueDashPlayerStats(
-            season=season_str, 
-            timeout=30
+            season=safe_season_str, 
+            timeout=60,                  # Increased timeout to 60s
+            headers=custom_headers       # PASS HEADERS HERE
         ).get_data_frames()[0]
-        
+
         usage_df = player_stats[['PLAYER_ID', 'USG_PCT']].copy()
         usage_df['PLAYER_ID'] = usage_df['PLAYER_ID'].astype(str)
+        print(f"✅ DEBUG: Usage Data Loaded ({len(usage_df)} rows)")
 
-        # 3. Team Stats (Defense)
+        # --- 4. FETCH DEFENSE (With Headers & Timeout) ---
+        print("⏳ DEBUG: Requesting Team Defense Stats...")
         team_stats = leaguedashteamstats.LeagueDashTeamStats(
-            season=season_str, 
-            timeout=30
+            season=safe_season_str, 
+            timeout=60,                  # Increased timeout to 60s
+            headers=custom_headers       # PASS HEADERS HERE
         ).get_data_frames()[0]
         
         team_stats['Def_Rank'] = team_stats['DEF_RATING'].rank(ascending=True)
         defense_df = team_stats[['TEAM_ID', 'Def_Rank']].copy()
         defense_df['TEAM_ID'] = defense_df['TEAM_ID'].astype(str)
+        print(f"✅ DEBUG: Defense Data Loaded ({len(defense_df)} rows)")
 
-        print(f"✅ DEBUG: Success! Found {len(usage_df)} players.")
         return usage_df, defense_df
 
     except Exception as e:
-        print(f"❌ STATS ERROR: {e}")
-        # Use traceback to see exactly WHICH line failed
-        import traceback
-        traceback.print_exc()
-        return pd.DataFrame(), pd.DataFrame()
+        print(f"❌ CRITICAL ERROR in get_usage_and_defense: {e}")
+        traceback.print_exc() # This will print the exact line causing the issue
+        return pd.DataFrame(), pd.DataFrame() # Returns empty to trigger your red banner
 
 def calculate_dk_points(row):
     score = (row['PTS']) + (row['FG3M'] * 0.5) + (row['REB'] * 1.25) + (row['AST'] * 1.5) + (row['STL'] * 2) + (row['BLK'] * 2) - (row['TOV'] * 0.5)
@@ -446,4 +468,5 @@ if run_btn:
                             if not usage_df.empty: st.write(f"Usage ID Type: {usage_df['PLAYER_ID'].dtype}")
 
                 else: st.error("Error: No historical data available.")
+
 

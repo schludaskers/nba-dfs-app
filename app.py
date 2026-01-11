@@ -151,24 +151,59 @@ def get_roster_data(team_ids):
     return pd.DataFrame(columns=['PLAYER_ID', 'POSITION'])
 
 @st.cache_data
-def get_usage_and_defense(season_str):
-    """Fetches Advanced Stats for the correct season."""
-    try:
-        # 1. Player Stats (Usage)
-        player_stats = leaguedashplayerstats.LeagueDashPlayerStats(season=season_str).get_data_frames()[0]
-        usage_df = player_stats[['PLAYER_ID', 'USG_PCT']].copy()
-        usage_df['PLAYER_ID'] = usage_df['PLAYER_ID'].astype(str) # Force String
+def get_current_nba_season():
+    """Calculates the correct 'YYYY-YY' string for the current NBA season."""
+    now = datetime.now()
+    # If we are in Jan-Sept (Month 1-9), the season started the previous year.
+    # e.g., Jan 2026 is the '2025-26' season.
+    if now.month < 10: 
+        start_year = now.year - 1
+    else:
+        start_year = now.year
         
-        # 2. Team Stats (Defense)
-        team_stats = leaguedashteamstats.LeagueDashTeamStats(season=season_str).get_data_frames()[0]
+    end_year_short = str(start_year + 1)[-2:]
+    return f"{start_year}-{end_year_short}"
+
+def get_usage_and_defense(season_str=None): # Allow optional override
+    """Fetches Advanced Stats for the correct season."""
+    
+    # 1. Auto-fix the season string if not valid or provided
+    if not season_str:
+        season_str = get_current_nba_season()
+        
+    print(f"🛠️ DEBUG: Fetching stats for season: '{season_str}'") # <--- CHECK THIS IN CONSOLE
+
+    try:
+        # headers = {'User-Agent': 'Mozilla/5.0'} # Uncomment if you still get timeout/403 errors
+        
+        # 2. Player Stats (Usage)
+        # Added timeout to prevent hanging
+        player_stats = leaguedashplayerstats.LeagueDashPlayerStats(
+            season=season_str, 
+            timeout=30
+        ).get_data_frames()[0]
+        
+        usage_df = player_stats[['PLAYER_ID', 'USG_PCT']].copy()
+        usage_df['PLAYER_ID'] = usage_df['PLAYER_ID'].astype(str)
+
+        # 3. Team Stats (Defense)
+        team_stats = leaguedashteamstats.LeagueDashTeamStats(
+            season=season_str, 
+            timeout=30
+        ).get_data_frames()[0]
+        
         team_stats['Def_Rank'] = team_stats['DEF_RATING'].rank(ascending=True)
         defense_df = team_stats[['TEAM_ID', 'Def_Rank']].copy()
-        defense_df['TEAM_ID'] = defense_df['TEAM_ID'].astype(str) # Force String
-        
+        defense_df['TEAM_ID'] = defense_df['TEAM_ID'].astype(str)
+
+        print(f"✅ DEBUG: Success! Found {len(usage_df)} players.")
         return usage_df, defense_df
+
     except Exception as e:
-        # Return empty DFs if API fails (likely future date error)
-        print(f"Stats Error: {e}")
+        print(f"❌ STATS ERROR: {e}")
+        # Use traceback to see exactly WHICH line failed
+        import traceback
+        traceback.print_exc()
         return pd.DataFrame(), pd.DataFrame()
 
 def calculate_dk_points(row):
@@ -411,3 +446,4 @@ if run_btn:
                             if not usage_df.empty: st.write(f"Usage ID Type: {usage_df['PLAYER_ID'].dtype}")
 
                 else: st.error("Error: No historical data available.")
+

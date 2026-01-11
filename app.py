@@ -101,7 +101,7 @@ def load_and_process_data():
 
 # SIDEBAR
 with st.sidebar:
-    st.image("https://cdn.nba.com/logos/leagues/nba-logoman-70x36.svg", width=100) # Placeholder logo
+    st.image("https://upload.wikimedia.org/wikipedia/en/0/03/National_Basketball_Association_logo.svg", width=100) # Placeholder logo
     st.title("CourtVision DFS")
     st.markdown("---")
     
@@ -209,4 +209,5 @@ if run_btn:
 
                 else:
                     st.warning("No players found matching criteria.")
+
 

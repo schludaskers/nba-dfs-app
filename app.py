@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import xgboost as xgb
 from datetime import datetime
-from nba_api.stats.endpoints import playergamelogs, scoreboardv2
+from nba_api.stats.endpoints import playergamelogs, scoreboardv2, commonteamroster
 
 # --- 1. VISUAL CONFIGURATION ---
 st.set_page_config(
@@ -32,7 +32,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. DATA FUNCTIONS (Unchanged logic, just hidden) ---
+# --- 2. DATA FUNCTIONS ---
 
 @st.cache_data
 def get_injury_report():
@@ -46,6 +46,7 @@ def get_injury_report():
         return []
 
 def get_teams_playing_today():
+    """Returns a list of Team IDs for teams playing today."""
     today_str = datetime.now().strftime('%Y-%m-%d')
     try:
         board = scoreboardv2.ScoreboardV2(game_date=today_str)
@@ -54,6 +55,25 @@ def get_teams_playing_today():
         return games_df['TEAM_ID'].unique().tolist()
     except:
         return []
+
+@st.cache_data
+def get_roster_players(team_ids):
+    """
+    Fetches the OFFICIAL current roster for every team playing today.
+    This fixes the issue of missing traded players or bench players.
+    """
+    active_player_ids = []
+    
+    # We loop through every team playing today and get their live roster
+    for tid in team_ids:
+        try:
+            # commonteamroster endpoint gets the current roster
+            roster = commonteamroster.CommonTeamRoster(team_id=tid).get_data_frames()[0]
+            active_player_ids.extend(roster['PLAYER_ID'].tolist())
+        except:
+            continue
+            
+    return active_player_ids
 
 def calculate_dk_points(row):
     pts = row['PTS']
@@ -101,7 +121,8 @@ def load_and_process_data():
 
 # SIDEBAR
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/en/0/03/National_Basketball_Association_logo.svg", width=100) # Placeholder logo
+    # Use Wikimedia's public URL for the NBA logo to avoid access errors
+    st.image("https://upload.wikimedia.org/wikipedia/en/0/03/National_Basketball_Association_logo.svg", width=100)
     st.title("CourtVision DFS")
     st.markdown("---")
     
@@ -121,6 +142,7 @@ if run_btn:
     # STATUS INDICATORS
     status_col1, status_col2, status_col3 = st.columns(3)
     
+    # 1. Get Teams Playing Today
     with status_col1:
         with st.spinner("Checking Schedule..."):
             active_teams = get_teams_playing_today()
@@ -129,6 +151,13 @@ if run_btn:
             else:
                 st.error("No Games Today")
 
+    # 2. Get Official Rosters for those teams (THE FIX)
+    active_roster_player_ids = []
+    if active_teams:
+        with st.spinner("Fetching Live Rosters..."):
+            active_roster_player_ids = get_roster_players(active_teams)
+
+    # 3. Get Injuries
     with status_col2:
         with st.spinner("Checking Injuries..."):
             injured_players = get_injury_report()
@@ -138,7 +167,7 @@ if run_btn:
         st.metric("Model Status", "Active", delta="Ready", delta_color="normal")
 
     # MODEL EXECUTION
-    if active_teams:
+    if active_teams and active_roster_player_ids:
         with st.spinner("Crunching the numbers (XGBoost)..."):
             df = load_and_process_data()
             
@@ -152,8 +181,15 @@ if run_btn:
                 model.fit(X, y)
                 
                 # Predict
+                # Take the LAST known stats for every player in history
                 latest_stats = df.groupby('PLAYER_ID').tail(1).copy()
-                active_mask = latest_stats['TEAM_ID'].isin(active_teams)
+                
+                # --- FILTERING FIX ---
+                # Instead of filtering by "Team in Last Game", we filter by "Is Player ID in Today's Roster?"
+                # This catches players who were traded or haven't played recently but are active today.
+                active_mask = latest_stats['PLAYER_ID'].isin(active_roster_player_ids)
+                
+                # Filter Injuries
                 injury_mask = ~latest_stats['PLAYER_NAME'].isin(injured_players) if not show_injured else True
                 
                 todays_slate = latest_stats[active_mask & injury_mask].copy()
@@ -168,17 +204,14 @@ if run_btn:
                     
                     top_3 = todays_slate.head(3).itertuples()
                     
-                    # Helper to display player card
                     def player_card(col, player):
                         with col:
-                            # NBA Headshot URL
                             img_url = f"https://cdn.nba.com/headshots/nba/latest/1040x760/{player.PLAYER_ID}.png"
                             st.image(img_url, use_column_width=True)
                             st.markdown(f"<h3 style='text-align: center;'>{player.PLAYER_NAME}</h3>", unsafe_allow_html=True)
                             st.markdown(f"<h2 style='text-align: center; color: #4CAF50;'>{player.Proj_DK_PTS:.1f} PTS</h2>", unsafe_allow_html=True)
                             st.caption(f"Last 5 Avg: {player.L5_DK_PTS:.1f}")
 
-                    # Render Top 3
                     players = list(top_3)
                     if len(players) >= 1: player_card(col1, players[0])
                     if len(players) >= 2: player_card(col2, players[1])
@@ -190,24 +223,28 @@ if run_btn:
                     tab1, tab2 = st.tabs(["📋 Full Rankings", "📊 Team Breakdown"])
                     
                     with tab1:
-                        # Clean Table with Pandas Styler
                         display_cols = ['PLAYER_NAME', 'TEAM_ABBREVIATION', 'Proj_DK_PTS', 'L5_DK_PTS', 'DAYS_REST']
                         
-                        st.dataframe(
-                            todays_slate[display_cols].head(50).style
-                            .format({'Proj_DK_PTS': '{:.1f}', 'L5_DK_PTS': '{:.1f}', 'DAYS_REST': '{:.0f}'})
-                            .background_gradient(subset=['Proj_DK_PTS'], cmap='Greens'),
-                            use_container_width=True,
-                            height=600
-                        )
+                        # Apply style with error handling (in case matplotlib is missing)
+                        try:
+                            styled_df = todays_slate[display_cols].head(50).style\
+                                .format({'Proj_DK_PTS': '{:.1f}', 'L5_DK_PTS': '{:.1f}', 'DAYS_REST': '{:.0f}'})\
+                                .background_gradient(subset=['Proj_DK_PTS'], cmap='Greens')
+                        except:
+                            # Fallback if matplotlib isn't installed
+                            styled_df = todays_slate[display_cols].head(50).style\
+                                .format({'Proj_DK_PTS': '{:.1f}', 'L5_DK_PTS': '{:.1f}', 'DAYS_REST': '{:.0f}'})
+
+                        st.dataframe(styled_df, use_container_width=True, height=600)
                         
                     with tab2:
-                        # Simple bar chart of total projected points per team
+                        # Chart
                         team_proj = todays_slate.groupby('TEAM_ABBREVIATION')['Proj_DK_PTS'].sum().sort_values(ascending=False)
                         st.bar_chart(team_proj)
                         st.caption("Which teams are expected to score the most fantasy points today?")
 
                 else:
-                    st.warning("No players found matching criteria.")
-
-
+                    st.warning("No players found matching today's rosters. (Check if season is active).")
+    else:
+        if not active_teams:
+            st.error("Cannot run model: No games found for today.")

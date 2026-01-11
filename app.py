@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import xgboost as xgb
 from datetime import datetime
-import pytz # New library for Timezone fixing
+import pytz 
 from nba_api.stats.endpoints import playergamelogs, scoreboardv2, commonteamroster
 
 # --- 1. VISUAL CONFIGURATION ---
@@ -49,8 +49,6 @@ def get_injury_report():
 
 @st.cache_data
 def get_daily_schedule():
-    # FIX: Force US/Eastern Time (NBA Time)
-    # This prevents server time (UTC) from messing up "Today's" date
     est = pytz.timezone('US/Eastern')
     today_str = datetime.now(est).strftime('%Y-%m-%d')
     
@@ -115,7 +113,9 @@ def load_and_process_data():
             pass 
     
     if not dfs: return pd.DataFrame()
-    df = pd.concat(dfs)
+    # ignore_index=True FIXES the duplicate index issue at the source
+    df = pd.concat(dfs, ignore_index=True)
+    
     df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'])
     df = df.sort_values(by=['PLAYER_ID', 'GAME_DATE'])
     df['MIN'] = pd.to_numeric(df['MIN'], errors='coerce')
@@ -138,7 +138,6 @@ if 'schedule_df' not in st.session_state:
 if 'active_teams' not in st.session_state:
     st.session_state['active_teams'] = []
 
-# Load schedule immediately
 schedule_df, active_teams = get_daily_schedule()
 st.session_state['schedule_df'] = schedule_df
 st.session_state['active_teams'] = active_teams
@@ -158,7 +157,7 @@ with st.sidebar:
             </div>
             """, unsafe_allow_html=True)
     else:
-        st.info("No games scheduled today (Check Timezone).")
+        st.info("No games scheduled today.")
     
     st.markdown("---")
     run_btn = st.button("🚀 Run Prediction Model", type="primary", use_container_width=True)
@@ -168,23 +167,20 @@ with st.sidebar:
 st.title("🏀 NBA Daily Fantasy Predictor")
 
 if run_btn:
-    # 1. Check if we even have teams
     if not active_teams:
-        st.error("❌ No games found for today! The API might see 'Today' as tomorrow depending on the time. Check the sidebar schedule.")
+        st.error("❌ No games found for today! Check the sidebar schedule.")
     else:
         status_col1, status_col2, status_col3 = st.columns(3)
         
         with status_col1:
             st.metric("Games Today", len(active_teams) // 2)
 
-        # 2. Get Rosters (with explicit error handling)
         active_roster_player_ids = []
         with st.spinner("Fetching Live Rosters..."):
             active_roster_player_ids = get_roster_players(active_teams)
 
-        # DEBUG CHECK: Did we actually get players?
         if not active_roster_player_ids:
-            st.error("⚠️ Error: Found teams playing, but could not retrieve Roster Data from NBA API. (The API might be timing out). Try clicking Run again.")
+            st.error("⚠️ Error: Found teams playing, but could not retrieve Roster Data from NBA API. Try clicking Run again.")
         else:
             with status_col2:
                 with st.spinner("Checking Injuries..."):
@@ -194,7 +190,6 @@ if run_btn:
             with status_col3:
                 st.metric("Model Status", "Active", delta="Ready", delta_color="normal")
 
-            # 3. Run Model
             with st.spinner("Crunching the numbers (XGBoost)..."):
                 df = load_and_process_data()
                 
@@ -240,8 +235,10 @@ if run_btn:
                         with tab1:
                             search = st.text_input("🔍 Search Player or Team", "")
                             
+                            # --- ERROR FIX: RESET INDEX ---
+                            # Resetting index here ensures we don't have duplicate rows causing the crash
                             display_cols = ['PLAYER_NAME', 'TEAM_ABBREVIATION', 'Proj_DK_PTS', 'L5_DK_PTS', 'DAYS_REST']
-                            display_df = todays_slate[display_cols].copy()
+                            display_df = todays_slate[display_cols].copy().reset_index(drop=True)
                             
                             if search:
                                 display_df = display_df[

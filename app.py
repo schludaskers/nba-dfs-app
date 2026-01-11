@@ -71,7 +71,6 @@ def smart_map_names(api_names, salary_names):
             mapping[api_name] = salary_norm_map[norm_api]
         else:
             # Filter salary list to only names starting with the same letter
-            # This prevents "Jayson" matching "Jae'Sean" purely by letter count
             candidates = [n for n in salary_norm_list if n.startswith(norm_api[0])]
             
             # 2. Fuzzy Match (Strict 0.9 cutoff)
@@ -104,7 +103,6 @@ def get_injury_report():
     try:
         url = "https://www.espn.com/nba/injuries"
         response = requests.get(url, headers=headers, timeout=5)
-        # ESPN has many small tables, we need to combine them
         dfs = pd.read_html(io.StringIO(response.text))
         all_injuries = []
         for df in dfs:
@@ -123,11 +121,13 @@ def get_injury_report():
     return pd.DataFrame(columns=['Player_Norm', 'Injury Status'])
 
 @st.cache_data
-def get_daily_schedule():
-    est = pytz.timezone('US/Eastern')
-    today_str = datetime.now(est).strftime('%Y-%m-%d')
+def get_daily_schedule(selected_date):
+    """
+    Fetches schedule for the SPECIFIC date passed in.
+    """
+    date_str = selected_date.strftime('%Y-%m-%d')
     try:
-        board = scoreboardv2.ScoreboardV2(game_date=today_str)
+        board = scoreboardv2.ScoreboardV2(game_date=date_str)
         header = board.game_header.get_data_frame()
         linescore = board.line_score.get_data_frame()
         if header.empty: return pd.DataFrame(), []
@@ -186,18 +186,13 @@ def load_and_process_data():
 
 # --- 3. UI LAYOUT ---
 
-if 'schedule_df' not in st.session_state:
-    st.session_state['schedule_df'] = pd.DataFrame()
-if 'active_teams' not in st.session_state:
-    st.session_state['active_teams'] = []
-
-schedule_df, active_teams = get_daily_schedule()
-st.session_state['schedule_df'] = schedule_df
-st.session_state['active_teams'] = active_teams
-
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/en/0/03/National_Basketball_Association_logo.svg", width=80)
     st.title("CourtVision DFS")
+    
+    # --- DATE PICKER (FIX FOR YESTERDAY'S GAMES) ---
+    est = pytz.timezone('US/Eastern')
+    selected_date = st.date_input("📅 Game Date", datetime.now(est))
     
     st.markdown("### 💰 Salary Data")
     salary_file = st.file_uploader("Upload DKSalaries.csv", type=['csv'])
@@ -205,12 +200,15 @@ with st.sidebar:
     st.markdown("### 🛠️ Manual Controls")
     manual_remove_text = st.text_area("Paste OUT Players (One per line)", height=100, placeholder="Joel Embiid\nKyrie Irving")
     
-    st.markdown("### 📅 Today's Games")
+    # FETCH SCHEDULE BASED ON SELECTED DATE
+    schedule_df, active_teams = get_daily_schedule(selected_date)
+
+    st.markdown("### 📅 Games Schedule")
     if not schedule_df.empty:
         for _, game in schedule_df.iterrows():
             st.markdown(f"<div class='game-card'><b>{game['Matchup']}</b><br><span style='color:#bbb'>{game['Status']}</span></div>", unsafe_allow_html=True)
     else:
-        st.info("No games scheduled.")
+        st.info("No games scheduled for this date.")
     
     st.markdown("---")
     run_btn = st.button("🚀 Run Prediction Model", type="primary", use_container_width=True)
@@ -221,10 +219,10 @@ st.title("🏀 NBA Daily Fantasy Predictor")
 
 if run_btn:
     if not active_teams:
-        st.error("❌ No games found for today!")
+        st.error(f"❌ No games found for {selected_date.strftime('%Y-%m-%d')}!")
     else:
         status1, status2, status3 = st.columns(3)
-        with status1: st.metric("Games Today", len(active_teams) // 2)
+        with status1: st.metric("Games On Slate", len(active_teams) // 2)
         
         active_ids = []
         with st.spinner("Fetching Rosters..."): active_ids = get_roster_players(active_teams)
@@ -236,7 +234,6 @@ if run_btn:
                 with st.spinner("Checking Injuries (CBS/ESPN)..."):
                     injury_df = get_injury_report()
                     
-                    # Process Scraped Injuries
                     if not injury_df.empty:
                         exclude_mask = injury_df['Injury Status'].str.contains('Out|Doubtful|Injured Reserve', case=False, na=False)
                         injured_list_norm = injury_df[exclude_mask]['Player_Norm'].tolist()
@@ -245,7 +242,6 @@ if run_btn:
                         injured_list_norm = []
                         status_map = {}
                     
-                    # Process Manual Overrides (Paste Box)
                     if manual_remove_text:
                         manual_names = [normalize_name(n) for n in manual_remove_text.split('\n') if n.strip()]
                         injured_list_norm.extend(manual_names)
@@ -278,7 +274,6 @@ if run_btn:
                         slate['Proj_DK_PTS'] = model.predict(slate[features])
                         slate['Injury Status'] = slate['PLAYER_NAME_NORM'].map(status_map).fillna("")
 
-                        # --- SMART SALARY MERGE ---
                         if salary_file is not None:
                             try:
                                 salaries = pd.read_csv(salary_file)
@@ -290,15 +285,12 @@ if run_btn:
                                     slate['Matched_Name'] = slate['PLAYER_NAME'].map(name_mapping)
                                     slate = slate.merge(salaries[['Name', 'Salary']], left_on='Matched_Name', right_on='Name', how='left')
                                     
-                                    # Clean up
                                     slate = slate.dropna(subset=['Salary'])
                                     slate = slate[slate['Salary'] > 0]
                                     
-                                    # --- SANITY CHECK: PREVENT BAD MATCHES ---
-                                    # If Proj > 30 and Salary < 4000, it's likely a match error (Star Player -> Scrub Salary)
                                     bad_match_mask = (slate['Proj_DK_PTS'] > 30) & (slate['Salary'] < 4000)
                                     if bad_match_mask.any():
-                                        st.toast(f"⚠️ Removed {bad_match_mask.sum()} suspicious matches (High Proj/Low Salary)", icon="🧹")
+                                        st.toast(f"⚠️ Removed {bad_match_mask.sum()} suspicious matches", icon="🧹")
                                         slate = slate[~bad_match_mask]
                                     
                                     slate['Value'] = slate.apply(lambda x: x['Proj_DK_PTS'] / (x['Salary']/1000), axis=1)
@@ -313,7 +305,6 @@ if run_btn:
                             slate['Salary'] = 0
                             slate['Value'] = 0
 
-                        # --- DISPLAY ---
                         slate = slate.sort_values(by='Proj_DK_PTS', ascending=False)
                         
                         top_scorers = slate.head(3)

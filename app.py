@@ -12,19 +12,12 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for a "Dark Mode" Sports App Vibe
+# Custom CSS
 st.markdown("""
     <style>
     .stApp {
         background-color: #0e1117;
         color: #fafafa;
-    }
-    .metric-card {
-        background-color: #262730;
-        padding: 10px;
-        border-radius: 8px;
-        border: 1px solid #41444b;
-        margin-bottom: 10px;
     }
     .game-card {
         background-color: #1f2026;
@@ -55,48 +48,32 @@ def get_injury_report():
 
 @st.cache_data
 def get_daily_schedule():
-    """
-    Fetches the daily schedule and returns a DataFrame with:
-    [Home Team, Away Team, Time/Status, Team IDs]
-    """
     today_str = datetime.now().strftime('%Y-%m-%d')
     try:
         board = scoreboardv2.ScoreboardV2(game_date=today_str)
         header = board.game_header.get_data_frame()
         linescore = board.line_score.get_data_frame()
         
-        if header.empty:
-            return pd.DataFrame(), []
+        if header.empty: return pd.DataFrame(), []
             
-        # Create a map of Team ID -> Abbreviation (e.g., 1610612747 -> LAL)
         team_map = pd.Series(linescore.TEAM_ABBREVIATION.values, index=linescore.TEAM_ID).to_dict()
         
         games = []
         for _, row in header.iterrows():
             home_id = row['HOME_TEAM_ID']
             away_id = row['VISITOR_TEAM_ID']
-            
-            # Formatting the matchup
-            matchup = f"{team_map.get(away_id, '???')} @ {team_map.get(home_id, '???')}"
-            
-            # Status: Shows "7:00 pm ET" or "Final" or "Q3 10:00"
             status = row['GAME_STATUS_TEXT'].strip()
-            
             games.append({
-                "Matchup": matchup,
-                "Status": status,
-                "Home_ID": home_id,
-                "Away_ID": away_id
+                "Matchup": f"{team_map.get(away_id, '???')} @ {team_map.get(home_id, '???')}",
+                "Status": status
             })
             
         return pd.DataFrame(games), header['HOME_TEAM_ID'].tolist() + header['VISITOR_TEAM_ID'].tolist()
-        
-    except Exception as e:
+    except:
         return pd.DataFrame(), []
 
 @st.cache_data
 def get_roster_players(team_ids):
-    """Fetches OFFICIAL current roster for teams playing today."""
     active_player_ids = []
     for tid in team_ids:
         try:
@@ -142,22 +119,22 @@ def load_and_process_data():
     df['DAYS_REST'] = df.groupby('PLAYER_ID')['GAME_DATE'].diff().dt.days - 1
     df['DAYS_REST'] = df['DAYS_REST'].fillna(3).clip(lower=0, upper=7)
 
+    # --- UPDATED ROLLING LOGIC ---
+    # Added min_periods=1 so we don't drop players with <10 games history
     stats_to_roll = ['MIN', 'PTS', 'REB', 'AST', 'FGA', 'DK_PTS']
     for col in stats_to_roll:
-        df[f'L5_{col}'] = df.groupby('PLAYER_ID')[col].transform(lambda x: x.shift(1).rolling(window=5).mean())
-        df[f'L10_{col}'] = df.groupby('PLAYER_ID')[col].transform(lambda x: x.shift(1).rolling(window=10).mean())
+        df[f'L5_{col}'] = df.groupby('PLAYER_ID')[col].transform(lambda x: x.shift(1).rolling(window=5, min_periods=1).mean())
+        df[f'L10_{col}'] = df.groupby('PLAYER_ID')[col].transform(lambda x: x.shift(1).rolling(window=10, min_periods=1).mean())
 
     return df.dropna()
 
 # --- 3. UI LAYOUT ---
 
-# Initialize session state for data persistence
 if 'schedule_df' not in st.session_state:
     st.session_state['schedule_df'] = pd.DataFrame()
 if 'active_teams' not in st.session_state:
     st.session_state['active_teams'] = []
 
-# Fetch Schedule ON LOAD (so sidebar is populated immediately)
 schedule_df, active_teams = get_daily_schedule()
 st.session_state['schedule_df'] = schedule_df
 st.session_state['active_teams'] = active_teams
@@ -167,7 +144,6 @@ with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/en/0/03/National_Basketball_Association_logo.svg", width=80)
     st.title("CourtVision DFS")
     
-    # --- NEW: SCHEDULE WIDGET ---
     st.markdown("### 📅 Today's Games")
     if not schedule_df.empty:
         for _, game in schedule_df.iterrows():
@@ -182,28 +158,22 @@ with st.sidebar:
     
     st.markdown("---")
     run_btn = st.button("🚀 Run Prediction Model", type="primary", use_container_width=True)
-    
-    st.markdown("### ⚙️ Settings")
     show_injured = st.checkbox("Show Injured Players", value=False)
 
 # MAIN AREA
 st.title("🏀 NBA Daily Fantasy Predictor")
-st.markdown("#### AI-Powered Projections for DraftKings")
 
 if run_btn:
-    # STATUS INDICATORS
     status_col1, status_col2, status_col3 = st.columns(3)
     
     with status_col1:
         st.metric("Games Today", len(active_teams) // 2)
 
-    # Get Official Rosters
     active_roster_player_ids = []
     if active_teams:
         with st.spinner("Fetching Live Rosters..."):
             active_roster_player_ids = get_roster_players(active_teams)
 
-    # Get Injuries
     with status_col2:
         with st.spinner("Checking Injuries..."):
             injured_players = get_injury_report()
@@ -212,7 +182,6 @@ if run_btn:
     with status_col3:
         st.metric("Model Status", "Active", delta="Ready", delta_color="normal")
 
-    # MODEL EXECUTION
     if active_teams and active_roster_player_ids:
         with st.spinner("Crunching the numbers (XGBoost)..."):
             df = load_and_process_data()
@@ -225,7 +194,6 @@ if run_btn:
                 model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=150, learning_rate=0.1)
                 model.fit(X, y)
                 
-                # Predict
                 latest_stats = df.groupby('PLAYER_ID').tail(1).copy()
                 
                 active_mask = latest_stats['PLAYER_ID'].isin(active_roster_player_ids)
@@ -237,7 +205,6 @@ if run_btn:
                     todays_slate['Proj_DK_PTS'] = model.predict(todays_slate[features])
                     todays_slate = todays_slate.sort_values(by='Proj_DK_PTS', ascending=False)
                     
-                    # HERO SECTION
                     st.markdown("### 🔥 Top 3 Projected Plays")
                     col1, col2, col3 = st.columns(3)
                     top_3 = todays_slate.head(3).itertuples()
@@ -248,7 +215,6 @@ if run_btn:
                             st.image(img_url, use_column_width=True)
                             st.markdown(f"<h3 style='text-align: center;'>{player.PLAYER_NAME}</h3>", unsafe_allow_html=True)
                             st.markdown(f"<h2 style='text-align: center; color: #4CAF50;'>{player.Proj_DK_PTS:.1f} PTS</h2>", unsafe_allow_html=True)
-                            st.caption(f"Last 5 Avg: {player.L5_DK_PTS:.1f}")
 
                     players = list(top_3)
                     if len(players) >= 1: player_card(col1, players[0])
@@ -257,27 +223,35 @@ if run_btn:
 
                     st.markdown("---")
 
-                    # TABS
                     tab1, tab2 = st.tabs(["📋 Full Rankings", "📊 Team Breakdown"])
                     
                     with tab1:
+                        # --- UPDATED TABLE ---
+                        # 1. Added Search/Filter
+                        search = st.text_input("🔍 Search Player or Team", "")
+                        
                         display_cols = ['PLAYER_NAME', 'TEAM_ABBREVIATION', 'Proj_DK_PTS', 'L5_DK_PTS', 'DAYS_REST']
+                        display_df = todays_slate[display_cols].copy()
+                        
+                        if search:
+                            display_df = display_df[
+                                display_df['PLAYER_NAME'].str.contains(search, case=False) | 
+                                display_df['TEAM_ABBREVIATION'].str.contains(search, case=False)
+                            ]
+                        
+                        # 2. REMOVED .head(50) LIMIT -> Shows all rows now
                         try:
-                            styled_df = todays_slate[display_cols].head(50).style\
+                            styled_df = display_df.style\
                                 .format({'Proj_DK_PTS': '{:.1f}', 'L5_DK_PTS': '{:.1f}', 'DAYS_REST': '{:.0f}'})\
                                 .background_gradient(subset=['Proj_DK_PTS'], cmap='Greens')
                         except:
-                            styled_df = todays_slate[display_cols].head(50).style\
+                            styled_df = display_df.style\
                                 .format({'Proj_DK_PTS': '{:.1f}', 'L5_DK_PTS': '{:.1f}', 'DAYS_REST': '{:.0f}'})
                         
-                        st.dataframe(styled_df, use_container_width=True, height=600)
+                        st.dataframe(styled_df, use_container_width=True, height=800)
                         
                     with tab2:
                         team_proj = todays_slate.groupby('TEAM_ABBREVIATION')['Proj_DK_PTS'].sum().sort_values(ascending=False)
                         st.bar_chart(team_proj)
-
                 else:
                     st.warning("No players found matching today's rosters.")
-    else:
-        if not active_teams:
-            st.error("Cannot run model: No games found for today.")

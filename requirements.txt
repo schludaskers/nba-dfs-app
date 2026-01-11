@@ -4,3 +4,4 @@ xgboost
 streamlit
 scikit-learn
 lxml
+matplotlib

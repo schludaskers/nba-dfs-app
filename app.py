@@ -6,7 +6,7 @@ import unicodedata
 import difflib
 import io
 import textwrap
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz 
 from nba_api.stats.endpoints import playergamelogs, scoreboardv2, commonteamroster, leaguedashplayerstats, leaguedashteamstats
 
@@ -27,6 +27,20 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # --- 2. DATA FUNCTIONS ---
+
+def get_season_string(date_obj):
+    """Calculates the NBA Season string (e.g., '2025-26') from a date."""
+    year = date_obj.year
+    month = date_obj.month
+    # If it's late in the year (Oct-Dec), the season starts this year.
+    # If it's early (Jan-June), the season started last year.
+    if month >= 10:
+        start_year = year
+    else:
+        start_year = year - 1
+    
+    end_year_short = (start_year + 1) % 100
+    return f"{start_year}-{end_year_short:02d}"
 
 def normalize_name(name):
     if not isinstance(name, str): return str(name)
@@ -68,7 +82,9 @@ def get_injury_report():
             name_col = next((c for c in df.columns if 'NAME' in c or 'PLAYER' in c), None)
             status_col = next((c for c in df.columns if 'STATUS' in c), None)
             
+            # Fallback for "Pos" column confusion
             if not status_col and len(df.columns) >= 3:
+                # If Col 1 is Position, Col 2 is Status
                 if str(df.iloc[0, 1]) in ['PG', 'SG', 'SF', 'PF', 'C']:
                     clean_df = df.iloc[:, [0, 2]].copy()
                     clean_df.columns = ['Player', 'Injury Status']
@@ -99,14 +115,14 @@ def get_daily_schedule(selected_date):
         
         team_map = pd.Series(linescore.TEAM_ABBREVIATION.values, index=linescore.TEAM_ID).to_dict()
         
-        # Build Map with STRING keys to avoid type mismatch
         opponent_map = {}
         games = []
         active_teams = []
         
         for _, row in header.iterrows():
-            home_id = str(row['HOME_TEAM_ID']) # Force String
-            away_id = str(row['VISITOR_TEAM_ID']) # Force String
+            # CAST TO STRING IMMEDIATELY
+            home_id = str(row['HOME_TEAM_ID'])
+            away_id = str(row['VISITOR_TEAM_ID'])
             
             opponent_map[home_id] = away_id
             opponent_map[away_id] = home_id
@@ -126,7 +142,7 @@ def get_roster_data(team_ids):
     for tid in team_ids:
         try:
             roster = commonteamroster.CommonTeamRoster(team_id=tid).get_data_frames()[0]
-            # Force ID to String
+            # CAST TO STRING
             roster['PLAYER_ID'] = roster['PLAYER_ID'].astype(str)
             all_rosters.append(roster[['PLAYER_ID', 'POSITION']])
         except: continue
@@ -135,21 +151,24 @@ def get_roster_data(team_ids):
     return pd.DataFrame(columns=['PLAYER_ID', 'POSITION'])
 
 @st.cache_data
-def get_usage_and_defense():
+def get_usage_and_defense(season_str):
+    """Fetches Advanced Stats for the correct season."""
     try:
         # 1. Player Stats (Usage)
-        player_stats = leaguedashplayerstats.LeagueDashPlayerStats(season='2024-25').get_data_frames()[0]
+        player_stats = leaguedashplayerstats.LeagueDashPlayerStats(season=season_str).get_data_frames()[0]
         usage_df = player_stats[['PLAYER_ID', 'USG_PCT']].copy()
         usage_df['PLAYER_ID'] = usage_df['PLAYER_ID'].astype(str) # Force String
         
         # 2. Team Stats (Defense)
-        team_stats = leaguedashteamstats.LeagueDashTeamStats(season='2024-25').get_data_frames()[0]
-        team_stats['Def_Rank'] = team_stats['DEF_RATING'].rank(ascending=True) # 1=Best Defense
+        team_stats = leaguedashteamstats.LeagueDashTeamStats(season=season_str).get_data_frames()[0]
+        team_stats['Def_Rank'] = team_stats['DEF_RATING'].rank(ascending=True)
         defense_df = team_stats[['TEAM_ID', 'Def_Rank']].copy()
         defense_df['TEAM_ID'] = defense_df['TEAM_ID'].astype(str) # Force String
         
         return usage_df, defense_df
-    except:
+    except Exception as e:
+        # Return empty DFs if API fails (likely future date error)
+        print(f"Stats Error: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
 def calculate_dk_points(row):
@@ -160,8 +179,11 @@ def calculate_dk_points(row):
     return score
 
 @st.cache_data
-def load_and_process_data():
-    seasons = ['2024-25', '2025-26']
+def load_and_process_data(season_str):
+    # Load requested season + previous season for history
+    prev_season = f"{int(season_str[:4])-1}-{int(season_str[-2:])-1}"
+    seasons = [prev_season, season_str]
+    
     dfs = []
     for season in seasons:
         try:
@@ -173,7 +195,7 @@ def load_and_process_data():
     df = pd.concat(dfs, ignore_index=True)
     df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'])
     
-    # FORCE STRING IDs
+    # CAST IDS TO STRING
     df['PLAYER_ID'] = df['PLAYER_ID'].astype(str)
     df['TEAM_ID'] = df['TEAM_ID'].astype(str)
     
@@ -196,6 +218,11 @@ with st.sidebar:
     st.title("CourtVision DFS")
     est = pytz.timezone('US/Eastern')
     selected_date = st.date_input("📅 Game Date", datetime.now(est))
+    
+    # Calculate Correct Season based on Date
+    current_season_str = get_season_string(selected_date)
+    st.caption(f"Season: {current_season_str}")
+    
     st.markdown("### 💰 Salary Data")
     salary_file = st.file_uploader("Upload DKSalaries.csv", type=['csv'])
     st.markdown("### 🛠️ Manual Controls")
@@ -246,11 +273,11 @@ if run_btn:
             
             with status3: st.metric("Model Status", "Ready")
             
-            with st.spinner("Processing Advanced Stats..."):
-                 usage_df, defense_df = get_usage_and_defense()
+            with st.spinner(f"Fetching Advanced Stats ({current_season_str})..."):
+                 usage_df, defense_df = get_usage_and_defense(current_season_str)
 
             with st.spinner("Running XGBoost Model..."):
-                df = load_and_process_data()
+                df = load_and_process_data(current_season_str)
                 
                 if not df.empty:
                     features = ['L5_DK_PTS', 'L10_DK_PTS', 'L5_MIN', 'L10_MIN', 'DAYS_REST', 'L5_FGA', 'L10_FGA']
@@ -262,20 +289,26 @@ if run_btn:
                     mask_active = latest['PLAYER_ID'].isin(active_ids)
                     slate = latest[mask_active].copy()
                     
-                    # MERGE ROSTER (POSITION)
+                    # --- MERGE DATA ---
+                    # 1. Position
                     if not roster_df.empty:
                         slate = slate.merge(roster_df, on='PLAYER_ID', how='left')
                     
-                    # MERGE USAGE (Fix: Force String IDs)
+                    # 2. Usage (Fix: Force String Merge)
                     if not usage_df.empty:
                         slate = slate.merge(usage_df, on='PLAYER_ID', how='left')
-                    else: slate['USG_PCT'] = 0.0
+                        # Fill NaNs with League Avg (20%) instead of 0
+                        slate['USG_PCT'] = slate['USG_PCT'].fillna(0.20)
+                    else: 
+                        slate['USG_PCT'] = 0.20
 
-                    # MERGE DEFENSE (Fix: Force String IDs & Map Logic)
+                    # 3. Defense
                     slate['OPP_TEAM_ID'] = slate['TEAM_ID'].map(opponent_map)
                     if not defense_df.empty:
                         slate = slate.merge(defense_df, left_on='OPP_TEAM_ID', right_on='TEAM_ID', how='left')
-                    else: slate['Def_Rank'] = 15
+                        slate['Def_Rank'] = slate['Def_Rank'].fillna(15)
+                    else: 
+                        slate['Def_Rank'] = 15
 
                     if not show_injured:
                         mask_auto_injury = ~slate['PLAYER_NAME_NORM'].isin(injured_list_norm)
@@ -314,7 +347,7 @@ if run_btn:
                         def draw_card(player):
                             img = f"https://cdn.nba.com/headshots/nba/latest/1040x760/{player.PLAYER_ID}.png"
                             status_html = f"<div style='color:#FFC107; font-size:0.8em; margin-bottom:5px;'>⚠️ {player['Injury Status']}</div>" if player['Injury Status'] else ""
-                            usg_val = player.get('USG_PCT', 0) * 100 if pd.notna(player.get('USG_PCT')) else 0
+                            usg_val = player.get('USG_PCT', 0.2) * 100
                             pos = player.get('POSITION', 'UNK')
                             
                             card_html = (
@@ -340,12 +373,12 @@ if run_btn:
                                 with col: draw_card(top_scorers.iloc[idx])
 
                         st.markdown("---")
-                        tab1, tab2 = st.tabs(["📋 Rankings", "📊 Teams"])
+                        tab1, tab2, tab3 = st.tabs(["📋 Rankings", "📊 Teams", "🛠️ Debug"])
                         
                         with tab1:
                             search = st.text_input("🔍 Search", "")
                             cols = ['PLAYER_NAME', 'POSITION', 'TEAM_ABBREVIATION', 'Injury Status', 'Def_Rank', 'USG_PCT', 'Salary', 'Proj_DK_PTS', 'Value']
-                            # Check if columns exist before display to avoid KeyError
+                            # Robust Column Selection
                             valid_cols = [c for c in cols if c in slate.columns]
                             show_df = slate[valid_cols].copy().reset_index(drop=True)
                             
@@ -364,4 +397,17 @@ if run_btn:
                                          use_container_width=True, height=800)
                         
                         with tab2: st.bar_chart(slate.groupby('TEAM_ABBREVIATION')['Proj_DK_PTS'].sum().sort_values(ascending=False))
+                        
+                        with tab3:
+                            st.write("### Data Health Check")
+                            if usage_df.empty: st.error("❌ Usage Data: Empty (API Failed)")
+                            else: st.success(f"✅ Usage Data: {len(usage_df)} rows")
+                            
+                            if defense_df.empty: st.error("❌ Defense Data: Empty (API Failed)")
+                            else: st.success(f"✅ Defense Data: {len(defense_df)} rows")
+                            
+                            st.write("### ID Type Check")
+                            st.write(f"Slate ID Type: {slate['PLAYER_ID'].dtype}")
+                            if not usage_df.empty: st.write(f"Usage ID Type: {usage_df['PLAYER_ID'].dtype}")
+
                 else: st.error("Error: No historical data available.")

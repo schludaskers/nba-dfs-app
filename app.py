@@ -69,7 +69,7 @@ def smart_map_names(api_names, salary_names):
 
 @st.cache_data
 def get_injury_report():
-    """Scrapes CBS Sports for the latest injury report."""
+    """Scrapes CBS Sports and returns the FULL dataframe (Name + Status)."""
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36'}
         url = "https://www.cbssports.com/nba/injuries/"
@@ -77,15 +77,14 @@ def get_injury_report():
         dfs = pd.read_html(response.text)
         injury_df = pd.concat(dfs)
         
-        # Normalize names
+        # Normalize names for matching
         injury_df['Player_Norm'] = injury_df['Player'].apply(normalize_name)
         
-        # Filter strictly for OUT/DOUBTFUL
-        out_mask = injury_df['Injury Status'].str.contains('Out|Doubtful|Injured Reserve', case=False, na=False)
-        return injury_df[out_mask]['Player_Norm'].tolist()
+        # We return the whole DF now, not just a list
+        return injury_df[['Player_Norm', 'Injury Status', 'Player']]
     except Exception as e:
         print(f"Injury Scrape Error: {e}")
-        return []
+        return pd.DataFrame()
 
 @st.cache_data
 def get_daily_schedule():
@@ -199,8 +198,20 @@ if run_btn:
         else:
             with status2:
                 with st.spinner("Checking Injuries..."):
-                    # Get normalized injury list
-                    injured_list_norm = get_injury_report()
+                    # Get FULL injury dataframe
+                    injury_df = get_injury_report()
+                    
+                    if not injury_df.empty:
+                        # 1. Create Exclusion List (For filtering Out/Doubtful)
+                        exclude_mask = injury_df['Injury Status'].str.contains('Out|Doubtful|Injured Reserve', case=False, na=False)
+                        injured_list_norm = injury_df[exclude_mask]['Player_Norm'].tolist()
+                        
+                        # 2. Create Status Map (For Displaying in Table)
+                        status_map = dict(zip(injury_df['Player_Norm'], injury_df['Injury Status']))
+                    else:
+                        injured_list_norm = []
+                        status_map = {}
+
                     st.metric("Injured Players Found", len(injured_list_norm))
             
             with status3: st.metric("Model Status", "Ready")
@@ -224,7 +235,7 @@ if run_btn:
 
                     # 2. Filter Injuries
                     if not show_injured:
-                        # Auto-scraper filter
+                        # Auto-scraper filter (Removes OUT/DOUBTFUL only)
                         mask_auto_injury = ~slate['PLAYER_NAME_NORM'].isin(injured_list_norm)
                         slate = slate[mask_auto_injury]
                         
@@ -236,30 +247,28 @@ if run_btn:
                     if not slate.empty:
                         slate['Proj_DK_PTS'] = model.predict(slate[features])
                         
+                        # --- ADD INJURY STATUS COLUMN ---
+                        # Map the status, fill NaNs with empty string
+                        slate['Injury Status'] = slate['PLAYER_NAME_NORM'].map(status_map).fillna("")
+
                         # --- SMART SALARY MERGE ---
                         if salary_file is not None:
                             try:
                                 salaries = pd.read_csv(salary_file)
                                 if 'Salary' in salaries.columns:
-                                    # Create map
                                     api_names = slate['PLAYER_NAME'].unique().tolist()
                                     salary_names = salaries['Name'].unique().tolist()
                                     name_mapping = smart_map_names(api_names, salary_names)
                                     
-                                    # Apply map
                                     slate['Matched_Name'] = slate['PLAYER_NAME'].map(name_mapping)
-                                    
-                                    # Merge
                                     slate = slate.merge(salaries[['Name', 'Salary']], 
                                                       left_on='Matched_Name', 
                                                       right_on='Name', 
                                                       how='left')
                                     
-                                    # --- THE FIX: FILTER ZERO SALARIES ---
                                     slate = slate[slate['Salary'] > 0]
                                     slate['Value'] = slate.apply(lambda x: x['Proj_DK_PTS'] / (x['Salary']/1000), axis=1)
                                 else:
-                                    st.error("CSV missing 'Salary' column")
                                     slate['Salary'] = 0
                                     slate['Value'] = 0
                             except Exception as e:
@@ -279,10 +288,13 @@ if run_btn:
 
                         def draw_card(player, label_type="points"):
                             img = f"https://cdn.nba.com/headshots/nba/latest/1040x760/{player.PLAYER_ID}.png"
+                            status_html = f"<div style='color:orange; font-size:0.8em;'>⚠️ {player['Injury Status']}</div>" if player['Injury Status'] else ""
+                            
                             st.markdown(f"""
                             <div style="text-align:center; background-color:#262730; padding:10px; border-radius:10px; border:1px solid #444;">
                                 <img src="{img}" style="width:100px; border-radius:50%;">
                                 <h4>{player.PLAYER_NAME}</h4>
+                                {status_html}
                                 <div style="display:flex; justify-content:space-between; padding:0 20px;">
                                     <span>💰 ${int(player.Salary)}</span>
                                     <span>📊 {player.Proj_DK_PTS:.1f}</span>
@@ -314,18 +326,36 @@ if run_btn:
                         
                         with tab1:
                             search = st.text_input("🔍 Search", "")
-                            cols = ['PLAYER_NAME', 'TEAM_ABBREVIATION', 'Salary', 'Proj_DK_PTS', 'Value', 'L5_DK_PTS']
+                            # Added 'Injury Status' to the display columns
+                            cols = ['PLAYER_NAME', 'TEAM_ABBREVIATION', 'Injury Status', 'Salary', 'Proj_DK_PTS', 'Value', 'L5_DK_PTS']
                             show_df = slate[cols].copy().reset_index(drop=True)
+                            
                             if search: show_df = show_df[show_df['PLAYER_NAME'].str.contains(search, case=False)]
-                            st.dataframe(show_df.style.format({'Salary': '${:.0f}', 'Proj_DK_PTS': '{:.1f}', 'Value': '{:.2f}x', 'L5_DK_PTS': '{:.1f}'}).background_gradient(subset=['Value'], cmap='RdYlGn', vmin=3, vmax=6), use_container_width=True, height=800)
+                            
+                            # Custom styling function for injury column
+                            def color_injury(val):
+                                if 'Out' in str(val) or 'Doubtful' in str(val):
+                                    return 'color: #FF5252; font-weight: bold'
+                                elif 'Questionable' in str(val) or 'Day' in str(val):
+                                    return 'color: #FFC107; font-weight: bold'
+                                return ''
+
+                            st.dataframe(
+                                show_df.style
+                                .format({'Salary': '${:.0f}', 'Proj_DK_PTS': '{:.1f}', 'Value': '{:.2f}x', 'L5_DK_PTS': '{:.1f}'})
+                                .applymap(color_injury, subset=['Injury Status'])
+                                .background_gradient(subset=['Value'], cmap='RdYlGn', vmin=3, vmax=6),
+                                use_container_width=True, height=800
+                            )
                         
                         with tab2:
                             st.bar_chart(slate.groupby('TEAM_ABBREVIATION')['Proj_DK_PTS'].sum().sort_values(ascending=False))
                             
                         with tab3:
-                            st.write("If you see an injured player in your rankings, look for their name in this list.")
-                            st.write(f"Total Injured Players Found: {len(injured_list_norm)}")
-                            st.write(injured_list_norm)
+                            st.write("Total Injured Players Found:", len(injured_list_norm))
+                            st.write("Raw Status Map (Sample):", list(status_map.items())[:10])
+                            if not injury_df.empty:
+                                st.dataframe(injury_df)
 
                 else:
                     st.error("Error: No historical data available.")

@@ -63,7 +63,6 @@ def smart_map_names(api_names, salary_names):
 
 @st.cache_data
 def get_injury_report():
-    # Basic ESPN Scraper
     headers = {'User-Agent': 'Mozilla/5.0'}
     url = "https://www.espn.com/nba/injuries"
     try:
@@ -71,17 +70,52 @@ def get_injury_report():
         dfs = pd.read_html(io.StringIO(response.text))
         all_injuries = []
         for df in dfs:
-            if len(df.columns) >= 2:
-                # Naive assumption: Col 0 is Name, Col 1 or 2 is Status
-                clean_df = df.iloc[:, :2].copy() 
+            # ESPN tables change format. We need to find the "Status" column dynamically.
+            
+            # Strategy 1: Check if the second column is "Position" (e.g., 'PG', 'C')
+            # If Col 1 is Position, then Col 2 is likely Status.
+            if len(df.columns) >= 3:
+                sample_val = str(df.iloc[0, 1]).upper()
+                if sample_val in ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F']:
+                    # Columns are likely: [Name, Pos, Date, Status, Comment]
+                    # We want Name (0) and Status (2 or 3). Usually 2 is Date, 3 is Status.
+                    # Let's search for the status keyword in the first row to be sure.
+                    row_vals = [str(x).lower() for x in df.iloc[0].values]
+                    status_idx = -1
+                    for i, val in enumerate(row_vals):
+                        if any(k in val for k in ['out', 'day-to-day', 'questionable', 'doubtful']):
+                            status_idx = i
+                            break
+                    
+                    # Fallback if keyword not found: assume column 3 (index 3) is status if len > 3
+                    target_idx = status_idx if status_idx != -1 else (3 if len(df.columns) > 3 else 2)
+                    
+                    clean_df = df.iloc[:, [0, target_idx]].copy()
+                    clean_df.columns = ['Player', 'Injury Status']
+                    all_injuries.append(clean_df)
+                    continue
+
+            # Strategy 2: Standard Name/Status headers check
+            df.columns = [str(c).upper() for c in df.columns]
+            name_col = next((c for c in df.columns if 'NAME' in c or 'PLAYER' in c), None)
+            status_col = next((c for c in df.columns if 'STATUS' in c), None)
+            
+            if name_col and status_col:
+                clean_df = df[[name_col, status_col]].copy()
                 clean_df.columns = ['Player', 'Injury Status']
+                # Remove header rows embedded in table
+                clean_df = clean_df[clean_df['Player'] != 'NAME']
                 all_injuries.append(clean_df)
         
         if all_injuries:
             combined = pd.concat(all_injuries)
             combined['Player_Norm'] = combined['Player'].apply(normalize_name)
             return combined[['Player_Norm', 'Injury Status']]
-    except: pass
+            
+    except Exception as e:
+        print(f"Injury Scrape Error: {e}")
+        pass
+        
     return pd.DataFrame(columns=['Player_Norm', 'Injury Status'])
 
 @st.cache_data
@@ -369,3 +403,4 @@ if run_btn:
                             st.write(f"Defense Rows: {len(defense_df)}")
                             st.write(slate.head())
                 else: st.error("Error: No historical data available.")
+

@@ -4,36 +4,44 @@ import xgboost as xgb
 from datetime import datetime
 from nba_api.stats.endpoints import playergamelogs, scoreboardv2
 
-# --- 1. CONFIG & HELPER FUNCTIONS ---
-st.set_page_config(page_title="NBA DFS Predictor", layout="wide")
+# --- 1. CONFIGURATION ---
+st.set_page_config(page_title="Pro NBA DFS Predictor", layout="wide")
+
+# --- 2. DATA FUNCTIONS ---
+
+@st.cache_data
+def get_injury_report():
+    """
+    Scrapes a public injury report to get a list of players who are 'Out'.
+    This is a 'hack' because official Injury APIs are expensive.
+    """
+    try:
+        # CBS Sports has a clean table structure that pandas can read easily
+        url = "https://www.cbssports.com/nba/injuries/"
+        dfs = pd.read_html(url)
+        injury_df = pd.concat(dfs)
+        
+        # Filter for players who are definitely OUT
+        # Keywords: 'Out', 'Expected to be out', etc.
+        out_players = injury_df[injury_df['Injury Status'].str.contains('Out', case=False, na=False)]
+        return out_players['Player'].tolist()
+    except Exception as e:
+        st.error(f"Could not load injury report: {e}")
+        return []
 
 def get_teams_playing_today():
-    """
-    Checks the NBA schedule for 'today' and returns a list of Team IDs 
-    that have a game scheduled.
-    """
-    # Get today's date in the format the API expects (YYYY-MM-DD)
+    """Gets the list of teams playing on today's slate."""
     today_str = datetime.now().strftime('%Y-%m-%d')
-    
     try:
-        # Pull the scoreboard for today
         board = scoreboardv2.ScoreboardV2(game_date=today_str)
-        # The 'LineScore' dataset contains the Team IDs for all games on the slate
         games_df = board.line_score.get_data_frame()
-        
-        if games_df.empty:
-            return []
-            
-        # Get unique Team IDs
-        playing_team_ids = games_df['TEAM_ID'].unique().tolist()
-        return playing_team_ids
-        
-    except Exception as e:
-        st.error(f"Error fetching schedule: {e}")
+        if games_df.empty: return []
+        return games_df['TEAM_ID'].unique().tolist()
+    except:
         return []
 
 def calculate_dk_points(row):
-    """Calculates DraftKings score based on official scoring rules."""
+    """DraftKings Scoring Formula"""
     pts = row['PTS']
     fg3m = row['FG3M']
     reb = row['REB']
@@ -42,96 +50,111 @@ def calculate_dk_points(row):
     blk = row['BLK']
     tov = row['TOV']
     
-    # Base scoring
     score = (pts * 1) + (fg3m * 0.5) + (reb * 1.25) + (ast * 1.5) + (stl * 2) + (blk * 2) - (tov * 0.5)
     
-    # Double-Double / Triple-Double Bonus
-    stats_checking = [pts, reb, ast, stl, blk]
-    double_digits = sum(1 for s in stats_checking if s >= 10)
-    
-    if double_digits >= 3:
-        score += 3
-    elif double_digits >= 2:
-        score += 1.5
-        
+    # Bonuses
+    double_digits = sum(1 for s in [pts, reb, ast, stl, blk] if s >= 10)
+    if double_digits >= 3: score += 3
+    elif double_digits >= 2: score += 1.5
     return score
 
 @st.cache_data
-def load_data():
-    """Fetches NBA game logs. Cached so it doesn't re-download on every click."""
-    # Fetch data for current and previous season
-    logs_24 = playergamelogs.PlayerGameLogs(season_nullable='2024-25').get_data_frames()[0]
-    logs_23 = playergamelogs.PlayerGameLogs(season_nullable='2023-24').get_data_frames()[0]
+def load_and_process_data():
+    """
+    1. Pulls 2 seasons of logs.
+    2. Calculates Days of Rest.
+    3. Calculates L5/L10 Rolling Stats.
+    """
+    # 1. Pull Data
+    seasons = ['2024-25', '2025-26']
+    dfs = []
+    for season in seasons:
+        try:
+            logs = playergamelogs.PlayerGameLogs(season_nullable=season).get_data_frames()[0]
+            dfs.append(logs)
+        except:
+            pass # Skip if season hasn't started or fails
+            
+    df = pd.concat(dfs)
     
-    df = pd.concat([logs_24, logs_23])
-    
-    # Calculate target variable: DraftKings Points
-    df['DK_PTS'] = df.apply(calculate_dk_points, axis=1)
-    
-    return df
-
-def feature_engineering(df):
-    """Creates rolling averages to predict future performance."""
-    # Sort by player and date
+    # 2. Basic Cleanup
+    df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'])
     df = df.sort_values(by=['PLAYER_ID', 'GAME_DATE'])
     
-    # Calculate "Last 5 Games" average for key stats
-    cols_to_roll = ['MIN', 'PTS', 'REB', 'AST', 'FGA', 'DK_PTS']
-    for col in cols_to_roll:
-        df[f'L5_{col}'] = df.groupby('PLAYER_ID')[col].transform(lambda x: x.shift(1).rolling(window=5).mean())
+    # 3. Calculate Target (DK Points)
+    df['DK_PTS'] = df.apply(calculate_dk_points, axis=1)
     
-    # Drop rows with NaN (the first 5 games of a player's season)
+    # 4. Feature Engineering: Days of Rest
+    # Calculate difference in days between current game and previous game for each player
+    df['DAYS_REST'] = df.groupby('PLAYER_ID')['GAME_DATE'].diff().dt.days - 1
+    df['DAYS_REST'] = df['DAYS_REST'].fillna(3) # Default to 3 days rest for first game of season
+    # Cap rest at 7 days (longer breaks don't add linear value)
+    df['DAYS_REST'] = df['DAYS_REST'].clip(lower=0, upper=7)
+
+    # 5. Feature Engineering: Rolling Stats (L5 and L10)
+    stats_to_roll = ['MIN', 'PTS', 'REB', 'AST', 'FGA', 'DK_PTS', 'USG_PCT'] # USG_PCT isn't in base logs, we use FGA as proxy for usage
+    
+    for col in stats_to_roll:
+        # Last 5 Games
+        df[f'L5_{col}'] = df.groupby('PLAYER_ID')[col].transform(lambda x: x.shift(1).rolling(window=5).mean())
+        # Last 10 Games
+        df[f'L10_{col}'] = df.groupby('PLAYER_ID')[col].transform(lambda x: x.shift(1).rolling(window=10).mean())
+
+    # Drop early season games where we don't have enough history for rolling stats
     df = df.dropna()
+    
     return df
 
-# --- 2. MAIN APP INTERFACE ---
-st.title("🏀 NBA DFS Mobile Predictor")
-st.write("Generating predictions for **Today's Slate** only.")
+# --- 3. MAIN APP ---
+st.title("🏀 Pro NBA DFS Model")
 
-if st.button("Get Predictions for Today"):
+if st.button("Run Prediction Model"):
     
-    # A. Get the list of teams playing today
-    with st.spinner('Checking today\'s schedule...'):
+    # 1. Get Context (Teams & Injuries)
+    with st.spinner("Checking Schedule & Injury Reports..."):
         active_teams = get_teams_playing_today()
-        
-    if not active_teams:
-        st.warning("No games found for today (or the API returned an empty schedule).")
-    else:
-        st.success(f"Found {len(active_teams)} teams playing today.")
+        injured_players = get_injury_report()
+        st.write(f"**Injured Players Found:** {len(injured_players)} (filtered out)")
 
-        # B. Load and Process Data
-        with st.spinner('Pulling player stats & Training Model...'):
-            raw_df = load_data()
-            processed_df = feature_engineering(raw_df)
+    if not active_teams:
+        st.error("No games scheduled for today.")
+    else:
+        # 2. Load Data
+        with st.spinner("Processing stats from 2024-26 seasons..."):
+            df = load_and_process_data()
             
-            # Features (X) and Target (y)
-            features = ['L5_MIN', 'L5_PTS', 'L5_REB', 'L5_AST', 'L5_FGA', 'L5_DK_PTS']
-            X = processed_df[features]
-            y = processed_df['DK_PTS']
+            # Define Features
+            features = [
+                'L5_DK_PTS', 'L10_DK_PTS',  # Recent Form
+                'L5_MIN', 'L10_MIN',        # Minutes Security
+                'DAYS_REST',                # Fatigue
+                'L5_FGA', 'L10_FGA'         # Volume/Usage proxy
+            ]
             
-            # Train XGBoost Model
-            model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=100)
+            X = df[features]
+            y = df['DK_PTS']
+            
+            # 3. Train Model
+            model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=150, learning_rate=0.1)
             model.fit(X, y)
             
-            # C. Predict "Tonight"
-            # Get the most recent stats for ALL players first
-            latest_games = processed_df.groupby('PLAYER_ID').tail(1).copy()
+            # 4. Predict for Tonight
+            # Take the LAST known stats for every player
+            latest_stats = df.groupby('PLAYER_ID').tail(1).copy()
             
-            # --- THE CRITICAL FILTER STEP ---
-            # Keep only players whose TEAM_ID is in the active_teams list
-            today_players = latest_games[latest_games['TEAM_ID'].isin(active_teams)].copy()
+            # Filter: Must be playing today AND Not Injured
+            active_mask = latest_stats['TEAM_ID'].isin(active_teams)
+            injury_mask = ~latest_stats['PLAYER_NAME'].isin(injured_players)
             
-            if today_players.empty:
-                st.error("No active players found matching today's teams. (Are rosters updated?)")
+            todays_slate = latest_stats[active_mask & injury_mask].copy()
+            
+            if todays_slate.empty:
+                st.warning("No active players found. (Check if season is active).")
             else:
-                # Predict only for these players
-                prediction_X = today_players[features]
-                today_players['Proj_DK_PTS'] = model.predict(prediction_X)
+                # Predict
+                todays_slate['Proj_DK_PTS'] = model.predict(todays_slate[features])
                 
-                # Display nicely
-                display_cols = ['PLAYER_NAME', 'TEAM_ABBREVIATION', 'Proj_DK_PTS', 'L5_DK_PTS', 'L5_MIN']
-                st.subheader("Today's Projected Leaders")
-                
-                # Format the numbers nicely
-                formatted_df = today_players[display_cols].sort_values(by='Proj_DK_PTS', ascending=False).head(30)
-                st.dataframe(formatted_df.style.format({'Proj_DK_PTS': '{:.1f}', 'L5_DK_PTS': '{:.1f}', 'L5_MIN': '{:.1f}'}))
+                # Show Top 50
+                cols = ['PLAYER_NAME', 'Proj_DK_PTS', 'L5_DK_PTS', 'DAYS_REST']
+                st.subheader("🔥 Top Predicted Plays")
+                st.dataframe(todays_slate[cols].sort_values(by='Proj_DK_PTS', ascending=False).head(50))

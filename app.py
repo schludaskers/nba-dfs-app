@@ -5,9 +5,10 @@ import requests
 import unicodedata
 import difflib
 import io
+import textwrap
 from datetime import datetime
 import pytz 
-from nba_api.stats.endpoints import playergamelogs, scoreboardv2, commonteamroster
+from nba_api.stats.endpoints import playergamelogs, scoreboardv2, commonteamroster, leaguedashplayerstats, leaguedashteamstats
 
 # --- 1. VISUAL CONFIGURATION ---
 st.set_page_config(
@@ -60,27 +61,19 @@ def smart_map_names(api_names, salary_names):
 
 @st.cache_data
 def get_injury_report():
-    """
-    SMART ESPN SCRAPER
-    - Searches for 'STATUS' column explicitly.
-    - Ignores 'POS' column.
-    """
+    """ESPN Scraper"""
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     url = "https://www.espn.com/nba/injuries"
     
     try:
         response = requests.get(url, headers=headers, timeout=10)
         dfs = pd.read_html(io.StringIO(response.text))
-        
         all_injuries = []
         for df in dfs:
             df.columns = [str(c).upper() for c in df.columns]
-            
-            # 1. Look for 'NAME' and 'STATUS' columns explicitly
             name_col = next((c for c in df.columns if 'NAME' in c or 'PLAYER' in c), None)
             status_col = next((c for c in df.columns if 'STATUS' in c), None)
             
-            # 2. Fallback: If Col 1 looks like Position, Col 2 is Status
             if not status_col and len(df.columns) >= 3:
                 sample_val = str(df.iloc[0, 1])
                 if sample_val in ['PG', 'SG', 'SF', 'PF', 'C']:
@@ -89,7 +82,6 @@ def get_injury_report():
                     all_injuries.append(clean_df)
                     continue
 
-            # 3. Standard Header Match
             if name_col and status_col:
                 clean_df = df[[name_col, status_col]].copy()
                 clean_df.columns = ['Player', 'Injury Status']
@@ -114,26 +106,63 @@ def get_daily_schedule(selected_date):
         board = scoreboardv2.ScoreboardV2(game_date=date_str)
         header = board.game_header.get_data_frame()
         linescore = board.line_score.get_data_frame()
-        if header.empty: return pd.DataFrame(), []
+        if header.empty: return pd.DataFrame(), [], {}
+        
         team_map = pd.Series(linescore.TEAM_ABBREVIATION.values, index=linescore.TEAM_ID).to_dict()
+        
+        # Build Opponent Map {TeamID: OpponentID}
+        opponent_map = {}
         games = []
         for _, row in header.iterrows():
-            home = team_map.get(row['HOME_TEAM_ID'], '???')
-            away = team_map.get(row['VISITOR_TEAM_ID'], '???')
+            home_id = row['HOME_TEAM_ID']
+            away_id = row['VISITOR_TEAM_ID']
+            opponent_map[home_id] = away_id
+            opponent_map[away_id] = home_id
+            
+            home = team_map.get(home_id, '???')
+            away = team_map.get(away_id, '???')
             games.append({"Matchup": f"{away} @ {home}", "Status": row['GAME_STATUS_TEXT'].strip()})
-        return pd.DataFrame(games), header['HOME_TEAM_ID'].tolist() + header['VISITOR_TEAM_ID'].tolist()
+            
+        active_teams = header['HOME_TEAM_ID'].tolist() + header['VISITOR_TEAM_ID'].tolist()
+        return pd.DataFrame(games), active_teams, opponent_map
     except:
-        return pd.DataFrame(), []
+        return pd.DataFrame(), [], {}
 
 @st.cache_data
-def get_roster_players(team_ids):
-    active_ids = []
+def get_roster_data(team_ids):
+    """Fetches Roster AND Position data."""
+    all_rosters = []
     for tid in team_ids:
         try:
             roster = commonteamroster.CommonTeamRoster(team_id=tid).get_data_frames()[0]
-            active_ids.extend(roster['PLAYER_ID'].tolist())
+            # Keep ID and Position
+            all_rosters.append(roster[['PLAYER_ID', 'POSITION']])
         except: continue
-    return active_ids
+    
+    if all_rosters:
+        return pd.concat(all_rosters)
+    return pd.DataFrame(columns=['PLAYER_ID', 'POSITION'])
+
+@st.cache_data
+def get_usage_and_defense():
+    """
+    1. Fetches USG% for all players.
+    2. Fetches Team Defensive Ratings (to calculate matchups).
+    """
+    try:
+        # 1. Player Stats (Usage)
+        player_stats = leaguedashplayerstats.LeagueDashPlayerStats(season='2024-25').get_data_frames()[0]
+        usage_df = player_stats[['PLAYER_ID', 'USG_PCT']]
+        
+        # 2. Team Stats (Defense)
+        team_stats = leaguedashteamstats.LeagueDashTeamStats(season='2024-25').get_data_frames()[0]
+        # Rank teams by Defensive Rating (1 = Best Def, 30 = Worst Def)
+        team_stats['Def_Rank'] = team_stats['DEF_RATING'].rank(ascending=True)
+        defense_df = team_stats[['TEAM_ID', 'Def_Rank', 'DEF_RATING']]
+        
+        return usage_df, defense_df
+    except:
+        return pd.DataFrame(), pd.DataFrame()
 
 def calculate_dk_points(row):
     score = (row['PTS']) + (row['FG3M'] * 0.5) + (row['REB'] * 1.25) + (row['AST'] * 1.5) + (row['STL'] * 2) + (row['BLK'] * 2) - (row['TOV'] * 0.5)
@@ -177,9 +206,9 @@ with st.sidebar:
     st.markdown("### 💰 Salary Data")
     salary_file = st.file_uploader("Upload DKSalaries.csv", type=['csv'])
     st.markdown("### 🛠️ Manual Controls")
-    manual_remove_text = st.text_area("Paste OUT Players (One per line)", height=100, placeholder="Joel Embiid\nKyrie Irving")
+    manual_remove_text = st.text_area("Paste OUT Players", height=100, placeholder="Joel Embiid\nKyrie Irving")
     
-    schedule_df, active_teams = get_daily_schedule(selected_date)
+    schedule_df, active_teams, opponent_map = get_daily_schedule(selected_date)
     st.markdown("### 📅 Games Schedule")
     if not schedule_df.empty:
         for _, game in schedule_df.iterrows():
@@ -199,33 +228,36 @@ if run_btn:
         status1, status2, status3 = st.columns(3)
         with status1: st.metric("Games On Slate", len(active_teams) // 2)
         
-        active_ids = []
-        with st.spinner("Fetching Rosters..."): active_ids = get_roster_players(active_teams)
+        roster_df = pd.DataFrame()
+        with st.spinner("Fetching Rosters..."): 
+            roster_df = get_roster_data(active_teams)
+            active_ids = roster_df['PLAYER_ID'].tolist() if not roster_df.empty else []
         
         if not active_ids:
             st.error("⚠️ API Error: Could not fetch rosters.")
         else:
             with status2:
-                with st.spinner("Checking Injuries (ESPN)..."):
+                with st.spinner("Checking Injuries..."):
                     injury_df = get_injury_report()
+                    status_map = {}
+                    injured_list_norm = []
                     
                     if not injury_df.empty:
                         status_map = dict(zip(injury_df['Player_Norm'], injury_df['Injury Status']))
                         exclude_mask = injury_df['Injury Status'].str.contains('Out|Doubtful|Injured Reserve', case=False, na=False)
                         injured_list_norm = injury_df[exclude_mask]['Player_Norm'].tolist()
-                    else:
-                        injured_list_norm = []
-                        status_map = {}
                     
                     if manual_remove_text:
                         manual_names = [normalize_name(n) for n in manual_remove_text.split('\n') if n.strip()]
                         injured_list_norm.extend(manual_names)
                         for m_name in manual_names: status_map[m_name] = "OUT (Manual)"
-
                     st.metric("Injured Players", len(injured_list_norm))
             
             with status3: st.metric("Model Status", "Ready")
             
+            with st.spinner("Processing Advanced Stats (Usage & Defense)..."):
+                 usage_df, defense_df = get_usage_and_defense()
+
             with st.spinner("Running XGBoost Model..."):
                 df = load_and_process_data()
                 
@@ -236,8 +268,30 @@ if run_btn:
                     
                     latest = df.groupby('PLAYER_ID').tail(1).copy()
                     latest['PLAYER_NAME_NORM'] = latest['PLAYER_NAME'].apply(normalize_name)
+                    
+                    # Filter Active IDs
                     mask_active = latest['PLAYER_ID'].isin(active_ids)
                     slate = latest[mask_active].copy()
+                    
+                    # Merge Position from Roster DF
+                    slate = slate.merge(roster_df, on='PLAYER_ID', how='left')
+                    
+                    # Merge Usage
+                    if not usage_df.empty:
+                        slate = slate.merge(usage_df, on='PLAYER_ID', how='left')
+                        slate['USG_PCT'] = slate['USG_PCT'].fillna(0.20) # Default to 20%
+                    else:
+                        slate['USG_PCT'] = 0.0
+
+                    # Merge Defense (Matchup)
+                    # 1. Map Player Team -> Opponent Team
+                    slate['OPP_TEAM_ID'] = slate['TEAM_ID'].map(opponent_map)
+                    # 2. Map Opponent Team -> Def Rank
+                    if not defense_df.empty:
+                        slate = slate.merge(defense_df, left_on='OPP_TEAM_ID', right_on='TEAM_ID', how='left', suffixes=('', '_opp'))
+                        # Rank 1 = Best Defense (Bad for fantasy), Rank 30 = Worst Defense (Good for fantasy)
+                    else:
+                        slate['Def_Rank'] = 15 # Average
 
                     if not show_injured:
                         mask_auto_injury = ~slate['PLAYER_NAME_NORM'].isin(injured_list_norm)
@@ -245,7 +299,6 @@ if run_btn:
 
                     if not slate.empty:
                         slate['Proj_DK_PTS'] = model.predict(slate[features])
-                        # Map injury status
                         slate['Injury Status'] = slate['PLAYER_NAME_NORM'].map(status_map).fillna("")
 
                         if salary_file is not None:
@@ -260,12 +313,10 @@ if run_btn:
                                     
                                     slate['Salary'] = pd.to_numeric(slate['Salary'], errors='coerce').fillna(0)
                                     slate['Proj_DK_PTS'] = pd.to_numeric(slate['Proj_DK_PTS'], errors='coerce').fillna(0)
-                                    
                                     slate = slate[slate['Salary'] > 0]
                                     
                                     bad_match_mask = (slate['Proj_DK_PTS'] > 30) & (slate['Salary'] < 4000)
                                     if bad_match_mask.any():
-                                        st.toast(f"⚠️ Removed {bad_match_mask.sum()} suspicious matches", icon="🧹")
                                         slate = slate[~bad_match_mask]
                                     
                                     slate['Value'] = slate.apply(lambda x: x['Proj_DK_PTS'] / (x['Salary']/1000), axis=1)
@@ -278,24 +329,25 @@ if run_btn:
                         slate = slate.sort_values(by='Proj_DK_PTS', ascending=False)
                         top_scorers = slate.head(3)
                         top_value = slate[slate['Proj_DK_PTS'] > 18].sort_values(by='Value', ascending=False).head(3)
-                        bad_plays = slate[slate['Salary'] > 6000].sort_values(by='Value', ascending=True).head(3)
 
-                        # --- FLAT HTML VISUAL FIX ---
-                        def draw_card(player, label_type="points"):
+                        def draw_card(player):
                             img = f"https://cdn.nba.com/headshots/nba/latest/1040x760/{player.PLAYER_ID}.png"
                             status_html = f"<div style='color:#FFC107; font-size:0.8em; margin-bottom:5px;'>⚠️ {player['Injury Status']}</div>" if player['Injury Status'] else ""
-                            color = '#4CAF50' if label_type!='bad' else '#FF5252'
+                            
+                            # USG Formatting
+                            usg_val = player.get('USG_PCT', 0) * 100
                             
                             card_html = (
-                                f'<div style="text-align:center; background-color:#262730; padding:15px; border-radius:12px; border:1px solid #444; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">'
+                                f'<div style="text-align:center; background-color:#262730; padding:15px; border-radius:12px; border:1px solid #444;">'
                                 f'<img src="{img}" style="width:90px; height:90px; border-radius:50%; border: 2px solid #333; margin-bottom:10px; object-fit: cover;" onerror="this.onerror=null; this.src=\'https://cdn.nba.com/headshots/nba/latest/1040x760/fallback.png\'">'
-                                f'<div style="font-weight:bold; font-size:1.1em; margin-bottom:5px;">{player.PLAYER_NAME}</div>'
+                                f'<div style="font-weight:bold; font-size:1.1em; margin-bottom:5px;">{player.PLAYER_NAME} <span style="font-size:0.8em; color:#bbb;">({player.POSITION})</span></div>'
                                 f'{status_html}'
+                                f'<div style="font-size:0.8em; color:#aaa; margin-bottom:5px;">Usage: {usg_val:.1f}%</div>'
                                 f'<div style="display:flex; justify-content:space-between; background:#1e1e24; padding:8px 12px; border-radius:6px; margin-top:8px;">'
                                 f'<span style="color:#ddd;">💰 ${int(player.Salary)}</span>'
                                 f'<span style="color:#fff; font-weight:bold;">📊 {player.Proj_DK_PTS:.1f}</span>'
                                 f'</div>'
-                                f'<div style="color: {color}; font-size:1.4em; font-weight:800; margin-top:10px;">'
+                                f'<div style="color: #4CAF50; font-size:1.4em; font-weight:800; margin-top:10px;">'
                                 f'{player.Value:.1f}x <span style="font-size:0.6em; font-weight:normal; color:#aaa;">VAL</span>'
                                 f'</div></div>'
                             )
@@ -307,42 +359,30 @@ if run_btn:
                             if idx < len(top_scorers): 
                                 with col: draw_card(top_scorers.iloc[idx])
 
-                        if salary_file:
-                            st.markdown("---")
-                            col_v, col_b = st.columns(2)
-                            with col_v:
-                                st.markdown("### 💎 Top Value (Proj > 18)")
-                                cols = st.columns(3)
-                                for i in range(min(3, len(top_value))):
-                                    with cols[i]: draw_card(top_value.iloc[i], "value")
-                            with col_b:
-                                st.markdown("### 🛑 Top Fades (Salary > $6k)")
-                                cols = st.columns(3)
-                                for i in range(min(3, len(bad_plays))):
-                                    with cols[i]: draw_card(bad_plays.iloc[i], "bad")
-
                         st.markdown("---")
-                        tab1, tab2, tab3 = st.tabs(["📋 Rankings", "📊 Teams", "🛠️ Debug"])
+                        tab1, tab2 = st.tabs(["📋 Rankings", "📊 Teams"])
                         
                         with tab1:
                             search = st.text_input("🔍 Search", "")
-                            cols = ['PLAYER_NAME', 'TEAM_ABBREVIATION', 'Injury Status', 'Salary', 'Proj_DK_PTS', 'Value', 'L5_DK_PTS']
+                            # Updated Columns
+                            cols = ['PLAYER_NAME', 'POSITION', 'TEAM_ABBREVIATION', 'Injury Status', 'Def_Rank', 'USG_PCT', 'Salary', 'Proj_DK_PTS', 'Value']
                             show_df = slate[cols].copy().reset_index(drop=True)
                             if search: show_df = show_df[show_df['PLAYER_NAME'].str.contains(search, case=False)]
                             
-                            def color_injury(val):
-                                if 'Out' in str(val) or 'Doubtful' in str(val): return 'color: #FF5252; font-weight: bold'
-                                elif 'Questionable' in str(val) or 'Day' in str(val): return 'color: #FFC107; font-weight: bold'
+                            def highlight_matchup(val):
+                                # 30 = Worst Defense (Good for fantasy) -> Green
+                                # 1 = Best Defense (Bad for fantasy) -> Red
+                                if val >= 20: return 'color: #4CAF50; font-weight: bold' # Good Matchup
+                                if val <= 10: return 'color: #FF5252; font-weight: bold' # Bad Matchup
                                 return ''
 
-                            st.dataframe(show_df.style.format({'Salary': '${:.0f}', 'Proj_DK_PTS': '{:.1f}', 'Value': '{:.2f}x', 'L5_DK_PTS': '{:.1f}'})
-                                         .map(color_injury, subset=['Injury Status'])
+                            # Formatting
+                            st.dataframe(show_df.style
+                                         .format({'Salary': '${:.0f}', 'Proj_DK_PTS': '{:.1f}', 'Value': '{:.2f}x', 'USG_PCT': '{:.1%}', 'Def_Rank': '{:.0f}'})
+                                         .map(highlight_matchup, subset=['Def_Rank'])
                                          .background_gradient(subset=['Value'], cmap='RdYlGn', vmin=3, vmax=6),
                                          use_container_width=True, height=800)
                         
                         with tab2: st.bar_chart(slate.groupby('TEAM_ABBREVIATION')['Proj_DK_PTS'].sum().sort_values(ascending=False))
-                        with tab3:
-                            if salary_file:
-                                debug_df = slate[['PLAYER_NAME', 'Matched_Name', 'Salary', 'Proj_DK_PTS']]
-                                st.dataframe(debug_df[debug_df['PLAYER_NAME'] != debug_df['Matched_Name']])
+
                 else: st.error("Error: No historical data available.")

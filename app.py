@@ -5,7 +5,6 @@ import requests
 import unicodedata
 import difflib
 import io
-import textwrap
 from datetime import datetime
 import pytz 
 from nba_api.stats.endpoints import playergamelogs, scoreboardv2, commonteamroster
@@ -75,20 +74,16 @@ def get_injury_report():
         
         all_injuries = []
         for df in dfs:
-            # Ensure headers are strings and uppercase
             df.columns = [str(c).upper() for c in df.columns]
             
             # 1. Look for 'NAME' and 'STATUS' columns explicitly
             name_col = next((c for c in df.columns if 'NAME' in c or 'PLAYER' in c), None)
             status_col = next((c for c in df.columns if 'STATUS' in c), None)
             
-            # 2. If 'STATUS' column missing, check if it's the 3rd column (Name, Pos, Status)
-            # This is a fallback if headers are messed up
+            # 2. Fallback: If Col 1 looks like Position, Col 2 is Status
             if not status_col and len(df.columns) >= 3:
-                # Check if Col 1 looks like Position (PG, SG, C)
                 sample_val = str(df.iloc[0, 1])
                 if sample_val in ['PG', 'SG', 'SF', 'PF', 'C']:
-                    # Then Column 2 is likely status
                     clean_df = df.iloc[:, [0, 2]].copy()
                     clean_df.columns = ['Player', 'Injury Status']
                     all_injuries.append(clean_df)
@@ -98,7 +93,6 @@ def get_injury_report():
             if name_col and status_col:
                 clean_df = df[[name_col, status_col]].copy()
                 clean_df.columns = ['Player', 'Injury Status']
-                # Clean up header rows that appear in data
                 clean_df = clean_df[clean_df['Player'] != 'NAME']
                 clean_df = clean_df[clean_df['Player'] != 'Player']
                 all_injuries.append(clean_df)
@@ -251,7 +245,7 @@ if run_btn:
 
                     if not slate.empty:
                         slate['Proj_DK_PTS'] = model.predict(slate[features])
-                        # IMPORTANT: Map the status so it shows up in the visuals
+                        # Map injury status
                         slate['Injury Status'] = slate['PLAYER_NAME_NORM'].map(status_map).fillna("")
 
                         if salary_file is not None:
@@ -269,7 +263,6 @@ if run_btn:
                                     
                                     slate = slate[slate['Salary'] > 0]
                                     
-                                    # GLITCH PREVENTION
                                     bad_match_mask = (slate['Proj_DK_PTS'] > 30) & (slate['Salary'] < 4000)
                                     if bad_match_mask.any():
                                         st.toast(f"⚠️ Removed {bad_match_mask.sum()} suspicious matches", icon="🧹")
@@ -287,25 +280,25 @@ if run_btn:
                         top_value = slate[slate['Proj_DK_PTS'] > 18].sort_values(by='Value', ascending=False).head(3)
                         bad_plays = slate[slate['Salary'] > 6000].sort_values(by='Value', ascending=True).head(3)
 
+                        # --- FLAT HTML VISUAL FIX ---
                         def draw_card(player, label_type="points"):
                             img = f"https://cdn.nba.com/headshots/nba/latest/1040x760/{player.PLAYER_ID}.png"
                             status_html = f"<div style='color:#FFC107; font-size:0.8em; margin-bottom:5px;'>⚠️ {player['Injury Status']}</div>" if player['Injury Status'] else ""
                             color = '#4CAF50' if label_type!='bad' else '#FF5252'
                             
-                            card_html = textwrap.dedent(f"""
-                                <div style="text-align:center; background-color:#262730; padding:15px; border-radius:12px; border:1px solid #444; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
-                                    <img src="{img}" style="width:90px; height:90px; border-radius:50%; border: 2px solid #333; margin-bottom:10px; object-fit: cover;" onerror="this.onerror=null; this.src='https://cdn.nba.com/headshots/nba/latest/1040x760/fallback.png'">
-                                    <div style="font-weight:bold; font-size:1.1em; margin-bottom:5px;">{player.PLAYER_NAME}</div>
-                                    {status_html}
-                                    <div style="display:flex; justify-content:space-between; background:#1e1e24; padding:8px 12px; border-radius:6px; margin-top:8px;">
-                                        <span style="color:#ddd;">💰 ${int(player.Salary)}</span>
-                                        <span style="color:#fff; font-weight:bold;">📊 {player.Proj_DK_PTS:.1f}</span>
-                                    </div>
-                                    <div style="color: {color}; font-size:1.4em; font-weight:800; margin-top:10px;">
-                                        {player.Value:.1f}x <span style="font-size:0.6em; font-weight:normal; color:#aaa;">VAL</span>
-                                    </div>
-                                </div>
-                            """)
+                            card_html = (
+                                f'<div style="text-align:center; background-color:#262730; padding:15px; border-radius:12px; border:1px solid #444; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">'
+                                f'<img src="{img}" style="width:90px; height:90px; border-radius:50%; border: 2px solid #333; margin-bottom:10px; object-fit: cover;" onerror="this.onerror=null; this.src=\'https://cdn.nba.com/headshots/nba/latest/1040x760/fallback.png\'">'
+                                f'<div style="font-weight:bold; font-size:1.1em; margin-bottom:5px;">{player.PLAYER_NAME}</div>'
+                                f'{status_html}'
+                                f'<div style="display:flex; justify-content:space-between; background:#1e1e24; padding:8px 12px; border-radius:6px; margin-top:8px;">'
+                                f'<span style="color:#ddd;">💰 ${int(player.Salary)}</span>'
+                                f'<span style="color:#fff; font-weight:bold;">📊 {player.Proj_DK_PTS:.1f}</span>'
+                                f'</div>'
+                                f'<div style="color: {color}; font-size:1.4em; font-weight:800; margin-top:10px;">'
+                                f'{player.Value:.1f}x <span style="font-size:0.6em; font-weight:normal; color:#aaa;">VAL</span>'
+                                f'</div></div>'
+                            )
                             st.markdown(card_html, unsafe_allow_html=True)
 
                         st.markdown("### 🏆 Top 3 Projected Scorers")

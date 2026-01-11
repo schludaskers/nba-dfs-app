@@ -22,6 +22,9 @@ st.markdown("""
     .stApp { background-color: #0e1117; color: #fafafa; }
     .game-card { background-color: #1f2026; padding: 10px; border-radius: 5px; margin-bottom: 8px; border-left: 4px solid #ff4b4b; font-size: 0.9em; }
     h1, h2, h3 { color: #ff4b4b !important; }
+    /* Card Hover Effect */
+    div[data-testid="stMarkdownContainer"] > div { transition: transform 0.2s; }
+    div[data-testid="stMarkdownContainer"] > div:hover { transform: scale(1.02); }
     </style>
     """, unsafe_allow_html=True)
 
@@ -70,32 +73,24 @@ def get_injury_report():
         dfs = pd.read_html(io.StringIO(response.text))
         all_injuries = []
         for df in dfs:
-            # ESPN tables change format. We need to find the "Status" column dynamically.
-            
-            # Strategy 1: Check if the second column is "Position" (e.g., 'PG', 'C')
-            # If Col 1 is Position, then Col 2 is likely Status.
+            # Strategy 1: Check if 2nd col is Position (e.g. 'PG')
             if len(df.columns) >= 3:
                 sample_val = str(df.iloc[0, 1]).upper()
                 if sample_val in ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F']:
-                    # Columns are likely: [Name, Pos, Date, Status, Comment]
-                    # We want Name (0) and Status (2 or 3). Usually 2 is Date, 3 is Status.
-                    # Let's search for the status keyword in the first row to be sure.
+                    # Likely [Name, Pos, Date, Status, Comment]
                     row_vals = [str(x).lower() for x in df.iloc[0].values]
                     status_idx = -1
                     for i, val in enumerate(row_vals):
                         if any(k in val for k in ['out', 'day-to-day', 'questionable', 'doubtful']):
                             status_idx = i
                             break
-                    
-                    # Fallback if keyword not found: assume column 3 (index 3) is status if len > 3
                     target_idx = status_idx if status_idx != -1 else (3 if len(df.columns) > 3 else 2)
-                    
                     clean_df = df.iloc[:, [0, target_idx]].copy()
                     clean_df.columns = ['Player', 'Injury Status']
                     all_injuries.append(clean_df)
                     continue
 
-            # Strategy 2: Standard Name/Status headers check
+            # Strategy 2: Standard Headers
             df.columns = [str(c).upper() for c in df.columns]
             name_col = next((c for c in df.columns if 'NAME' in c or 'PLAYER' in c), None)
             status_col = next((c for c in df.columns if 'STATUS' in c), None)
@@ -103,7 +98,6 @@ def get_injury_report():
             if name_col and status_col:
                 clean_df = df[[name_col, status_col]].copy()
                 clean_df.columns = ['Player', 'Injury Status']
-                # Remove header rows embedded in table
                 clean_df = clean_df[clean_df['Player'] != 'NAME']
                 all_injuries.append(clean_df)
         
@@ -115,7 +109,6 @@ def get_injury_report():
     except Exception as e:
         print(f"Injury Scrape Error: {e}")
         pass
-        
     return pd.DataFrame(columns=['Player_Norm', 'Injury Status'])
 
 @st.cache_data
@@ -165,7 +158,7 @@ def get_usage_and_defense(season_str=None):
         # 1. Load Usage
         usage_df = pd.read_csv('nba_usage_2026.csv')
         usage_df['PLAYER_ID'] = usage_df['PLAYER_ID'].astype(str)
-        # CRITICAL FIX: Rename Name column so it doesn't overwrite your Main DF Name
+        # Rename Name column so it doesn't overwrite Main DF Name
         if 'PLAYER_NAME' in usage_df.columns:
             usage_df = usage_df.rename(columns={'PLAYER_NAME': 'Usage_Name'})
 
@@ -180,7 +173,6 @@ def get_usage_and_defense(season_str=None):
 
 def calculate_dk_points(row):
     score = (row['PTS']) + (row['FG3M'] * 0.5) + (row['REB'] * 1.25) + (row['AST'] * 1.5) + (row['STL'] * 2) + (row['BLK'] * 2) - (row['TOV'] * 0.5)
-    # Double-Double Bonus (Simplified)
     double_digits = sum(1 for s in [row['PTS'], row['REB'], row['AST'], row['STL'], row['BLK']] if s >= 10)
     if double_digits >= 3: score += 3
     elif double_digits >= 2: score += 1.5
@@ -188,7 +180,6 @@ def calculate_dk_points(row):
 
 @st.cache_data
 def load_and_process_data(season_str):
-    # Load requested season + previous season for history
     prev_season = f"{int(season_str[:4])-1}-{int(season_str[-2:])-1}"
     seasons = [prev_season, season_str]
     
@@ -203,7 +194,6 @@ def load_and_process_data(season_str):
     df = pd.concat(dfs, ignore_index=True)
     df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'])
     
-    # CAST IDS TO STRING
     df['PLAYER_ID'] = df['PLAYER_ID'].astype(str)
     df['TEAM_ID'] = df['TEAM_ID'].astype(str)
     
@@ -275,7 +265,6 @@ if run_btn:
             
             with status3: st.metric("Model Status", "XGBoost Active")
             
-            # --- LOAD STATIC STATS ---
             usage_df, defense_df = get_usage_and_defense()
 
             with st.spinner("Running XGBoost Model..."):
@@ -292,7 +281,7 @@ if run_btn:
                     latest['PLAYER_NAME_NORM'] = latest['PLAYER_NAME'].apply(normalize_name)
                     slate = latest[latest['PLAYER_ID'].isin(active_ids)].copy()
                     
-                    # --- SAFE MERGES ---
+                    # --- MERGES ---
                     if not roster_df.empty:
                         slate = slate.merge(roster_df, on='PLAYER_ID', how='left')
                     
@@ -338,12 +327,21 @@ if run_btn:
                             except: slate['Salary'] = 0; slate['Value'] = 0
                         else: slate['Salary'] = 0; slate['Value'] = 0
 
+                        # --- CREATE SECTIONS ---
+                        
+                        # 1. Top Scorers (Highest Projection)
                         slate = slate.sort_values(by='Proj_DK_PTS', ascending=False)
                         top_scorers = slate.head(3)
 
-                        # --- ROBUST CARD DRAWING FUNCTION ---
-                        def draw_card(player):
-                            # Safe Get function to prevent AttributeErrors
+                        # 2. Top Value (Proj > 18 & High Value)
+                        top_value = slate[slate['Proj_DK_PTS'] > 18].sort_values(by='Value', ascending=False).head(3)
+
+                        # 3. Top Fades (Salary > 6000 & Low Value)
+                        top_fades = slate[slate['Salary'] >= 6000].sort_values(by='Value', ascending=True).head(3)
+
+                        # --- CARD DRAWING FUNCTION ---
+                        def draw_card(player, label=None):
+                            # Safe Get function
                             def get_val(row, keys, default="UNK"):
                                 for k in keys:
                                     if k in row.index: return row[k]
@@ -360,13 +358,16 @@ if run_btn:
                             
                             val_color = "#4CAF50" if val >= 5 else "#FFC107" if val >= 4 else "#F44336"
                             img = f"https://cdn.nba.com/headshots/nba/latest/1040x760/{pid}.png"
+                            
+                            label_html = f"<div style='position:absolute; top:5px; right:5px; background:#333; padding:2px 6px; border-radius:4px; font-size:0.7em; color:#ddd;'>{label}</div>" if label else ""
 
                             st.markdown(
                                 f"""
-                                <div style="text-align:center; background-color:#262730; padding:15px; border-radius:12px; border:1px solid #444;">
+                                <div style="position:relative; text-align:center; background-color:#262730; padding:15px; border-radius:12px; border:1px solid #444; margin-bottom:10px;">
+                                    {label_html}
                                     <img src="{img}" style="width:90px; height:90px; border-radius:50%; border: 2px solid #333; margin-bottom:10px; object-fit: cover;" onerror="this.onerror=null; this.src='https://cdn.nba.com/headshots/nba/latest/1040x760/fallback.png'">
                                     <div style="font-weight:bold; font-size:1.1em; margin-bottom:5px;">{name} <span style="font-size:0.8em; color:#bbb;">({pos})</span></div>
-                                    <div style="color:#FFC107; font-size:0.8em; margin-bottom:5px;">{status}</div>
+                                    <div style="color:#FFC107; font-size:0.8em; margin-bottom:5px; height:15px;">{status}</div>
                                     <div style="font-size:0.8em; color:#aaa; margin-bottom:5px;">Usage: {usg:.1f}%</div>
                                     <div style="display:flex; justify-content:space-between; background:#1e1e24; padding:8px 12px; border-radius:6px; margin-top:8px;">
                                         <span style="color:#ddd;">💰 ${int(sal)}</span>
@@ -379,11 +380,25 @@ if run_btn:
                                 """, unsafe_allow_html=True
                             )
 
+                        # --- RENDER SECTIONS ---
+                        
                         st.markdown("### 🏆 Top 3 Projected Scorers")
                         c1, c2, c3 = st.columns(3)
                         for idx, col in enumerate([c1, c2, c3]):
                             if idx < len(top_scorers): 
-                                with col: draw_card(top_scorers.iloc[idx])
+                                with col: draw_card(top_scorers.iloc[idx], "🔥 Top Scorer")
+
+                        st.markdown("### 💰 Top 3 Value Plays (Best ROI)")
+                        c1, c2, c3 = st.columns(3)
+                        for idx, col in enumerate([c1, c2, c3]):
+                            if idx < len(top_value): 
+                                with col: draw_card(top_value.iloc[idx], "💎 Value")
+                                
+                        st.markdown("### 📉 Top 3 Fades (Avoid - High Salary, Low Value)")
+                        c1, c2, c3 = st.columns(3)
+                        for idx, col in enumerate([c1, c2, c3]):
+                            if idx < len(top_fades): 
+                                with col: draw_card(top_fades.iloc[idx], "🛑 Fade")
 
                         st.markdown("---")
                         tab1, tab2, tab3 = st.tabs(["📋 Rankings", "📊 Teams", "🛠️ Debug"])
@@ -403,4 +418,3 @@ if run_btn:
                             st.write(f"Defense Rows: {len(defense_df)}")
                             st.write(slate.head())
                 else: st.error("Error: No historical data available.")
-

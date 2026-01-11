@@ -4,6 +4,7 @@ import xgboost as xgb
 import requests
 import unicodedata
 import difflib
+import io
 from datetime import datetime
 import pytz 
 from nba_api.stats.endpoints import playergamelogs, scoreboardv2, commonteamroster
@@ -22,6 +23,7 @@ st.markdown("""
     .game-card { background-color: #1f2026; padding: 10px; border-radius: 5px; margin-bottom: 8px; border-left: 4px solid #ff4b4b; font-size: 0.9em; }
     .metric-card { background-color: #262730; padding: 15px; border-radius: 10px; border: 1px solid #41444b; text-align: center; }
     h1, h2, h3 { color: #ff4b4b !important; }
+    div[data-testid="stExpander"] details summary p { font-size: 1.1em; font-weight: 600; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -53,7 +55,9 @@ def normalize_name(name):
 def smart_map_names(api_names, salary_names):
     """
     Maps API names to Salary CSV names.
-    STRICTER MATCHING: Now requires 0.9 (90%) similarity to avoid Tatum -> Tate errors.
+    STRICTER MATCHING: 
+    1. First letter MUST match.
+    2. Similarity > 0.90 (90%) required.
     """
     mapping = {}
     salary_norm_map = {normalize_name(name): name for name in salary_names}
@@ -66,8 +70,12 @@ def smart_map_names(api_names, salary_names):
         if norm_api in salary_norm_map:
             mapping[api_name] = salary_norm_map[norm_api]
         else:
+            # Filter salary list to only names starting with the same letter
+            # This prevents "Jayson" matching "Jae'Sean" purely by letter count
+            candidates = [n for n in salary_norm_list if n.startswith(norm_api[0])]
+            
             # 2. Fuzzy Match (Strict 0.9 cutoff)
-            matches = difflib.get_close_matches(norm_api, salary_norm_list, n=1, cutoff=0.90)
+            matches = difflib.get_close_matches(norm_api, candidates, n=1, cutoff=0.90)
             if matches:
                 mapping[api_name] = salary_norm_map[matches[0]]
                 
@@ -76,34 +84,39 @@ def smart_map_names(api_names, salary_names):
 @st.cache_data
 def get_injury_report():
     """
-    Tries CBS Sports first, falls back to Fox Sports if blocked.
+    Tries CBS Sports first, falls back to ESPN if blocked.
     Returns DataFrame: [Player_Norm, Injury Status]
     """
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
     
-    # Source 1: CBS Sports
+    # --- SOURCE 1: CBS SPORTS ---
     try:
         url = "https://www.cbssports.com/nba/injuries/"
         response = requests.get(url, headers=headers, timeout=5)
-        dfs = pd.read_html(response.text)
+        dfs = pd.read_html(io.StringIO(response.text))
         injury_df = pd.concat(dfs)
         injury_df['Player_Norm'] = injury_df['Player'].apply(normalize_name)
         return injury_df[['Player_Norm', 'Injury Status']]
     except:
         pass # Fall through to backup
     
-    # Source 2: Fox Sports (Backup)
+    # --- SOURCE 2: ESPN ---
     try:
-        url = "https://www.foxsports.com/nba/injuries"
+        url = "https://www.espn.com/nba/injuries"
         response = requests.get(url, headers=headers, timeout=5)
-        dfs = pd.read_html(response.text)
-        injury_df = pd.concat(dfs)
-        # Fox might have different column names, adjust if needed
-        # Usually they have 'Player' and 'Status'
-        if 'Player' in injury_df.columns and 'Status' in injury_df.columns:
-            injury_df.rename(columns={'Status': 'Injury Status'}, inplace=True)
-            injury_df['Player_Norm'] = injury_df['Player'].apply(normalize_name)
-            return injury_df[['Player_Norm', 'Injury Status']]
+        # ESPN has many small tables, we need to combine them
+        dfs = pd.read_html(io.StringIO(response.text))
+        all_injuries = []
+        for df in dfs:
+            if 'NAME' in df.columns and 'STATUS' in df.columns:
+                temp = df[['NAME', 'STATUS']].copy()
+                temp.rename(columns={'NAME': 'Player', 'STATUS': 'Injury Status'}, inplace=True)
+                all_injuries.append(temp)
+        
+        if all_injuries:
+            combined = pd.concat(all_injuries)
+            combined['Player_Norm'] = combined['Player'].apply(normalize_name)
+            return combined[['Player_Norm', 'Injury Status']]
     except:
         pass
 
@@ -190,7 +203,7 @@ with st.sidebar:
     salary_file = st.file_uploader("Upload DKSalaries.csv", type=['csv'])
     
     st.markdown("### 🛠️ Manual Controls")
-    manual_remove = st.text_input("Force Remove Player", placeholder="e.g. Embiid")
+    manual_remove_text = st.text_area("Paste OUT Players (One per line)", height=100, placeholder="Joel Embiid\nKyrie Irving")
     
     st.markdown("### 📅 Today's Games")
     if not schedule_df.empty:
@@ -220,9 +233,10 @@ if run_btn:
             st.error("⚠️ API Error: Could not fetch rosters.")
         else:
             with status2:
-                with st.spinner("Checking Injuries..."):
+                with st.spinner("Checking Injuries (CBS/ESPN)..."):
                     injury_df = get_injury_report()
                     
+                    # Process Scraped Injuries
                     if not injury_df.empty:
                         exclude_mask = injury_df['Injury Status'].str.contains('Out|Doubtful|Injured Reserve', case=False, na=False)
                         injured_list_norm = injury_df[exclude_mask]['Player_Norm'].tolist()
@@ -230,10 +244,15 @@ if run_btn:
                     else:
                         injured_list_norm = []
                         status_map = {}
+                    
+                    # Process Manual Overrides (Paste Box)
+                    if manual_remove_text:
+                        manual_names = [normalize_name(n) for n in manual_remove_text.split('\n') if n.strip()]
+                        injured_list_norm.extend(manual_names)
+                        for m_name in manual_names:
+                            status_map[m_name] = "OUT (Manual)"
 
                     st.metric("Injured Players Found", len(injured_list_norm))
-                    if len(injured_list_norm) == 0:
-                         st.warning("⚠️ Warning: Could not download injury report.")
             
             with status3: st.metric("Model Status", "Ready")
             
@@ -254,9 +273,6 @@ if run_btn:
                     if not show_injured:
                         mask_auto_injury = ~slate['PLAYER_NAME_NORM'].isin(injured_list_norm)
                         slate = slate[mask_auto_injury]
-                        if manual_remove:
-                            manual_norm = normalize_name(manual_remove)
-                            slate = slate[~slate['PLAYER_NAME_NORM'].str.contains(manual_norm)]
 
                     if not slate.empty:
                         slate['Proj_DK_PTS'] = model.predict(slate[features])
@@ -274,15 +290,15 @@ if run_btn:
                                     slate['Matched_Name'] = slate['PLAYER_NAME'].map(name_mapping)
                                     slate = slate.merge(salaries[['Name', 'Salary']], left_on='Matched_Name', right_on='Name', how='left')
                                     
-                                    # Fix: Drop rows where match failed or salary is 0
+                                    # Clean up
                                     slate = slate.dropna(subset=['Salary'])
                                     slate = slate[slate['Salary'] > 0]
                                     
-                                    # Sanity Check: If Proj > 40 and Salary < 4000, it's probably a bad match
-                                    # We treat these as errors and drop them to avoid the "18x Value" glitch
-                                    bad_match_mask = (slate['Proj_DK_PTS'] > 40) & (slate['Salary'] < 4000)
+                                    # --- SANITY CHECK: PREVENT BAD MATCHES ---
+                                    # If Proj > 30 and Salary < 4000, it's likely a match error (Star Player -> Scrub Salary)
+                                    bad_match_mask = (slate['Proj_DK_PTS'] > 30) & (slate['Salary'] < 4000)
                                     if bad_match_mask.any():
-                                        st.warning(f"⚠️ Dropped {bad_match_mask.sum()} players due to suspicious salary matching (Proj > 40pts but Salary < $4k).")
+                                        st.toast(f"⚠️ Removed {bad_match_mask.sum()} suspicious matches (High Proj/Low Salary)", icon="🧹")
                                         slate = slate[~bad_match_mask]
                                     
                                     slate['Value'] = slate.apply(lambda x: x['Proj_DK_PTS'] / (x['Salary']/1000), axis=1)
@@ -290,7 +306,7 @@ if run_btn:
                                     slate['Salary'] = 0
                                     slate['Value'] = 0
                             except Exception as e:
-                                st.warning(f"Error processing salary file: {e}")
+                                st.error(f"Error processing salary file: {e}")
                                 slate['Salary'] = 0
                                 slate['Value'] = 0
                         else:

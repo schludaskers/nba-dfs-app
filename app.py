@@ -401,7 +401,8 @@ if run_btn:
                                 with col: draw_card(top_fades.iloc[idx], "🛑 Fade")
 
                         st.markdown("---")
-                        tab1, tab2, tab3 = st.tabs(["📋 Rankings", "📊 Teams", "🛠️ Debug"])
+                        # --- REMOVED TEAMS TAB ---
+                        tab1, tab2 = st.tabs(["📋 Rankings", "🛠️ Debug"])
                         
                         with tab1:
                             cols = ['PLAYER_NAME', 'POSITION', 'TEAM_ABBREVIATION', 'Injury Status', 'Def_Rank', 'USG_PCT', 'Salary', 'Proj_DK_PTS', 'Value']
@@ -411,9 +412,6 @@ if run_btn:
                                          .background_gradient(subset=['Value'], cmap='RdYlGn', vmin=3, vmax=6))
                         
                         with tab2:
-                            st.bar_chart(slate.groupby('TEAM_ABBREVIATION')['Proj_DK_PTS'].sum().sort_values(ascending=False))
-                            
-                        with tab3:
                             st.write(f"Usage Rows: {len(usage_df)}")
                             st.write(f"Defense Rows: {len(defense_df)}")
                             st.write(slate.head())

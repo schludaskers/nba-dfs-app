@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import xgboost as xgb
 from datetime import datetime
+import pytz # New library for Timezone fixing
 from nba_api.stats.endpoints import playergamelogs, scoreboardv2, commonteamroster
 
 # --- 1. VISUAL CONFIGURATION ---
@@ -48,7 +49,11 @@ def get_injury_report():
 
 @st.cache_data
 def get_daily_schedule():
-    today_str = datetime.now().strftime('%Y-%m-%d')
+    # FIX: Force US/Eastern Time (NBA Time)
+    # This prevents server time (UTC) from messing up "Today's" date
+    est = pytz.timezone('US/Eastern')
+    today_str = datetime.now(est).strftime('%Y-%m-%d')
+    
     try:
         board = scoreboardv2.ScoreboardV2(game_date=today_str)
         header = board.game_header.get_data_frame()
@@ -119,8 +124,6 @@ def load_and_process_data():
     df['DAYS_REST'] = df.groupby('PLAYER_ID')['GAME_DATE'].diff().dt.days - 1
     df['DAYS_REST'] = df['DAYS_REST'].fillna(3).clip(lower=0, upper=7)
 
-    # --- UPDATED ROLLING LOGIC ---
-    # Added min_periods=1 so we don't drop players with <10 games history
     stats_to_roll = ['MIN', 'PTS', 'REB', 'AST', 'FGA', 'DK_PTS']
     for col in stats_to_roll:
         df[f'L5_{col}'] = df.groupby('PLAYER_ID')[col].transform(lambda x: x.shift(1).rolling(window=5, min_periods=1).mean())
@@ -135,6 +138,7 @@ if 'schedule_df' not in st.session_state:
 if 'active_teams' not in st.session_state:
     st.session_state['active_teams'] = []
 
+# Load schedule immediately
 schedule_df, active_teams = get_daily_schedule()
 st.session_state['schedule_df'] = schedule_df
 st.session_state['active_teams'] = active_teams
@@ -154,7 +158,7 @@ with st.sidebar:
             </div>
             """, unsafe_allow_html=True)
     else:
-        st.info("No games scheduled today.")
+        st.info("No games scheduled today (Check Timezone).")
     
     st.markdown("---")
     run_btn = st.button("🚀 Run Prediction Model", type="primary", use_container_width=True)
@@ -164,94 +168,101 @@ with st.sidebar:
 st.title("🏀 NBA Daily Fantasy Predictor")
 
 if run_btn:
-    status_col1, status_col2, status_col3 = st.columns(3)
-    
-    with status_col1:
-        st.metric("Games Today", len(active_teams) // 2)
+    # 1. Check if we even have teams
+    if not active_teams:
+        st.error("❌ No games found for today! The API might see 'Today' as tomorrow depending on the time. Check the sidebar schedule.")
+    else:
+        status_col1, status_col2, status_col3 = st.columns(3)
+        
+        with status_col1:
+            st.metric("Games Today", len(active_teams) // 2)
 
-    active_roster_player_ids = []
-    if active_teams:
+        # 2. Get Rosters (with explicit error handling)
+        active_roster_player_ids = []
         with st.spinner("Fetching Live Rosters..."):
             active_roster_player_ids = get_roster_players(active_teams)
 
-    with status_col2:
-        with st.spinner("Checking Injuries..."):
-            injured_players = get_injury_report()
-            st.metric("Injured Players", len(injured_players))
+        # DEBUG CHECK: Did we actually get players?
+        if not active_roster_player_ids:
+            st.error("⚠️ Error: Found teams playing, but could not retrieve Roster Data from NBA API. (The API might be timing out). Try clicking Run again.")
+        else:
+            with status_col2:
+                with st.spinner("Checking Injuries..."):
+                    injured_players = get_injury_report()
+                    st.metric("Injured Players", len(injured_players))
 
-    with status_col3:
-        st.metric("Model Status", "Active", delta="Ready", delta_color="normal")
+            with status_col3:
+                st.metric("Model Status", "Active", delta="Ready", delta_color="normal")
 
-    if active_teams and active_roster_player_ids:
-        with st.spinner("Crunching the numbers (XGBoost)..."):
-            df = load_and_process_data()
-            
-            if not df.empty:
-                features = ['L5_DK_PTS', 'L10_DK_PTS', 'L5_MIN', 'L10_MIN', 'DAYS_REST', 'L5_FGA', 'L10_FGA']
-                X = df[features]
-                y = df['DK_PTS']
+            # 3. Run Model
+            with st.spinner("Crunching the numbers (XGBoost)..."):
+                df = load_and_process_data()
                 
-                model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=150, learning_rate=0.1)
-                model.fit(X, y)
-                
-                latest_stats = df.groupby('PLAYER_ID').tail(1).copy()
-                
-                active_mask = latest_stats['PLAYER_ID'].isin(active_roster_player_ids)
-                injury_mask = ~latest_stats['PLAYER_NAME'].isin(injured_players) if not show_injured else True
-                
-                todays_slate = latest_stats[active_mask & injury_mask].copy()
-                
-                if not todays_slate.empty:
-                    todays_slate['Proj_DK_PTS'] = model.predict(todays_slate[features])
-                    todays_slate = todays_slate.sort_values(by='Proj_DK_PTS', ascending=False)
+                if not df.empty:
+                    features = ['L5_DK_PTS', 'L10_DK_PTS', 'L5_MIN', 'L10_MIN', 'DAYS_REST', 'L5_FGA', 'L10_FGA']
+                    X = df[features]
+                    y = df['DK_PTS']
                     
-                    st.markdown("### 🔥 Top 3 Projected Plays")
-                    col1, col2, col3 = st.columns(3)
-                    top_3 = todays_slate.head(3).itertuples()
+                    model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=150, learning_rate=0.1)
+                    model.fit(X, y)
                     
-                    def player_card(col, player):
-                        with col:
-                            img_url = f"https://cdn.nba.com/headshots/nba/latest/1040x760/{player.PLAYER_ID}.png"
-                            st.image(img_url, use_column_width=True)
-                            st.markdown(f"<h3 style='text-align: center;'>{player.PLAYER_NAME}</h3>", unsafe_allow_html=True)
-                            st.markdown(f"<h2 style='text-align: center; color: #4CAF50;'>{player.Proj_DK_PTS:.1f} PTS</h2>", unsafe_allow_html=True)
-
-                    players = list(top_3)
-                    if len(players) >= 1: player_card(col1, players[0])
-                    if len(players) >= 2: player_card(col2, players[1])
-                    if len(players) >= 3: player_card(col3, players[2])
-
-                    st.markdown("---")
-
-                    tab1, tab2 = st.tabs(["📋 Full Rankings", "📊 Team Breakdown"])
+                    latest_stats = df.groupby('PLAYER_ID').tail(1).copy()
                     
-                    with tab1:
-                        # --- UPDATED TABLE ---
-                        # 1. Added Search/Filter
-                        search = st.text_input("🔍 Search Player or Team", "")
+                    active_mask = latest_stats['PLAYER_ID'].isin(active_roster_player_ids)
+                    injury_mask = ~latest_stats['PLAYER_NAME'].isin(injured_players) if not show_injured else True
+                    
+                    todays_slate = latest_stats[active_mask & injury_mask].copy()
+                    
+                    if not todays_slate.empty:
+                        todays_slate['Proj_DK_PTS'] = model.predict(todays_slate[features])
+                        todays_slate = todays_slate.sort_values(by='Proj_DK_PTS', ascending=False)
                         
-                        display_cols = ['PLAYER_NAME', 'TEAM_ABBREVIATION', 'Proj_DK_PTS', 'L5_DK_PTS', 'DAYS_REST']
-                        display_df = todays_slate[display_cols].copy()
+                        st.markdown("### 🔥 Top 3 Projected Plays")
+                        col1, col2, col3 = st.columns(3)
+                        top_3 = todays_slate.head(3).itertuples()
                         
-                        if search:
-                            display_df = display_df[
-                                display_df['PLAYER_NAME'].str.contains(search, case=False) | 
-                                display_df['TEAM_ABBREVIATION'].str.contains(search, case=False)
-                            ]
+                        def player_card(col, player):
+                            with col:
+                                img_url = f"https://cdn.nba.com/headshots/nba/latest/1040x760/{player.PLAYER_ID}.png"
+                                st.image(img_url, use_column_width=True)
+                                st.markdown(f"<h3 style='text-align: center;'>{player.PLAYER_NAME}</h3>", unsafe_allow_html=True)
+                                st.markdown(f"<h2 style='text-align: center; color: #4CAF50;'>{player.Proj_DK_PTS:.1f} PTS</h2>", unsafe_allow_html=True)
+
+                        players = list(top_3)
+                        if len(players) >= 1: player_card(col1, players[0])
+                        if len(players) >= 2: player_card(col2, players[1])
+                        if len(players) >= 3: player_card(col3, players[2])
+
+                        st.markdown("---")
+
+                        tab1, tab2 = st.tabs(["📋 Full Rankings", "📊 Team Breakdown"])
                         
-                        # 2. REMOVED .head(50) LIMIT -> Shows all rows now
-                        try:
-                            styled_df = display_df.style\
-                                .format({'Proj_DK_PTS': '{:.1f}', 'L5_DK_PTS': '{:.1f}', 'DAYS_REST': '{:.0f}'})\
-                                .background_gradient(subset=['Proj_DK_PTS'], cmap='Greens')
-                        except:
-                            styled_df = display_df.style\
-                                .format({'Proj_DK_PTS': '{:.1f}', 'L5_DK_PTS': '{:.1f}', 'DAYS_REST': '{:.0f}'})
-                        
-                        st.dataframe(styled_df, use_container_width=True, height=800)
-                        
-                    with tab2:
-                        team_proj = todays_slate.groupby('TEAM_ABBREVIATION')['Proj_DK_PTS'].sum().sort_values(ascending=False)
-                        st.bar_chart(team_proj)
+                        with tab1:
+                            search = st.text_input("🔍 Search Player or Team", "")
+                            
+                            display_cols = ['PLAYER_NAME', 'TEAM_ABBREVIATION', 'Proj_DK_PTS', 'L5_DK_PTS', 'DAYS_REST']
+                            display_df = todays_slate[display_cols].copy()
+                            
+                            if search:
+                                display_df = display_df[
+                                    display_df['PLAYER_NAME'].str.contains(search, case=False) | 
+                                    display_df['TEAM_ABBREVIATION'].str.contains(search, case=False)
+                                ]
+                            
+                            try:
+                                styled_df = display_df.style\
+                                    .format({'Proj_DK_PTS': '{:.1f}', 'L5_DK_PTS': '{:.1f}', 'DAYS_REST': '{:.0f}'})\
+                                    .background_gradient(subset=['Proj_DK_PTS'], cmap='Greens')
+                            except:
+                                styled_df = display_df.style\
+                                    .format({'Proj_DK_PTS': '{:.1f}', 'L5_DK_PTS': '{:.1f}', 'DAYS_REST': '{:.0f}'})
+                            
+                            st.dataframe(styled_df, use_container_width=True, height=800)
+                            
+                        with tab2:
+                            team_proj = todays_slate.groupby('TEAM_ABBREVIATION')['Proj_DK_PTS'].sum().sort_values(ascending=False)
+                            st.bar_chart(team_proj)
+                    else:
+                        st.warning("No players found matching today's rosters.")
                 else:
-                    st.warning("No players found matching today's rosters.")
+                    st.error("Error: Could not load historical player data.")

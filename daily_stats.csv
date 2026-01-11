@@ -1,0 +1,33 @@
+Player,Team,Pos,PTS,TRB,AST,STL,BLK,TOV,Last_5_Avg_FP,Opp_Def_Rank,Minutes_Avg
+Iowa Hawkeyes G 1,Iowa Hawkeyes,G,12,3,1,0,0,4,17.0288841816358,20,19
+Iowa Hawkeyes G 2,Iowa Hawkeyes,G,4,1,6,0,0,3,13.574873384204713,224,12
+Iowa Hawkeyes G 3,Iowa Hawkeyes,G,8,6,5,2,2,3,23.316846574621437,26,20
+Iowa Hawkeyes F 4,Iowa Hawkeyes,F,9,3,3,1,2,0,13.993646805603237,169,30
+Iowa Hawkeyes F 5,Iowa Hawkeyes,F,16,5,0,1,0,3,17.702129073578405,317,14
+Iowa Hawkeyes C 6,Iowa Hawkeyes,C,4,4,5,2,1,2,13.917585508645981,361,23
+Iowa Hawkeyes G 7,Iowa Hawkeyes,G,5,2,1,1,1,3,7.278284293339153,137,16
+Iowa Hawkeyes F 8,Iowa Hawkeyes,F,16,1,1,2,1,1,21.962496912163164,21,15
+UCF Knights G 1,UCF Knights,G,5,8,6,2,0,3,26.52841583532709,98,17
+UCF Knights G 2,UCF Knights,G,19,7,4,2,1,2,31.761866481923438,278,30
+UCF Knights G 3,UCF Knights,G,11,9,0,1,1,2,24.029614950086323,352,13
+UCF Knights F 4,UCF Knights,F,8,1,2,0,2,1,10.969534196181243,196,24
+UCF Knights F 5,UCF Knights,F,4,5,1,2,2,3,10.736825565968116,333,16
+UCF Knights C 6,UCF Knights,C,16,11,0,1,1,0,33.14958114704922,359,29
+UCF Knights G 7,UCF Knights,G,9,10,2,1,2,4,23.89093216729888,40,12
+UCF Knights F 8,UCF Knights,F,19,7,2,0,1,1,25.781419200063556,10,19
+Illinois Fighting Illini G 1,Illinois Fighting Illini,G,17,5,4,0,0,1,25.879266224120364,256,27
+Illinois Fighting Illini G 2,Illinois Fighting Illini,G,10,10,5,1,1,4,24.55451118657418,296,27
+Illinois Fighting Illini G 3,Illinois Fighting Illini,G,19,4,7,1,1,1,32.18948125770589,303,12
+Illinois Fighting Illini F 4,Illinois Fighting Illini,F,10,2,6,0,2,0,19.072185645257328,217,17
+Illinois Fighting Illini F 5,Illinois Fighting Illini,F,4,11,2,2,1,3,18.76911462108331,14,17
+Illinois Fighting Illini C 6,Illinois Fighting Illini,C,20,8,4,2,1,4,38.342683705724184,274,35
+Illinois Fighting Illini G 7,Illinois Fighting Illini,G,6,11,0,0,1,1,23.033857833040123,327,15
+Illinois Fighting Illini F 8,Illinois Fighting Illini,F,21,11,7,2,1,0,40.113114215779476,60,24
+Cincinnati Bearcats G 1,Cincinnati Bearcats,G,22,7,0,0,0,1,33.864218800240366,311,36
+Cincinnati Bearcats G 2,Cincinnati Bearcats,G,10,7,7,1,1,4,32.584143166233346,85,31
+Cincinnati Bearcats G 3,Cincinnati Bearcats,G,6,10,1,2,0,3,21.52086824371211,27,23
+Cincinnati Bearcats F 4,Cincinnati Bearcats,F,6,9,1,0,2,1,17.760634019405614,218,11
+Cincinnati Bearcats F 5,Cincinnati Bearcats,F,23,11,2,0,2,4,36.56881986515935,194,35
+Cincinnati Bearcats C 6,Cincinnati Bearcats,C,21,6,5,1,1,3,30.096100916793482,241,10
+Cincinnati Bearcats G 7,Cincinnati Bearcats,G,24,2,2,2,1,3,27.520811767084364,108,13
+Cincinnati Bearcats F 8,Cincinnati Bearcats,F,10,7,4,0,1,4,22.02506235781577,96,34

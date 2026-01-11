@@ -15,114 +15,73 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
 st.markdown("""
     <style>
-    .stApp {
-        background-color: #0e1117;
-        color: #fafafa;
-    }
-    .game-card {
-        background-color: #1f2026;
-        padding: 10px;
-        border-radius: 5px;
-        margin-bottom: 8px;
-        border-left: 4px solid #ff4b4b;
-        font-size: 0.9em;
-    }
-    h1, h2, h3 {
-        color: #ff4b4b !important;
-    }
+    .stApp { background-color: #0e1117; color: #fafafa; }
+    .game-card { background-color: #1f2026; padding: 10px; border-radius: 5px; margin-bottom: 8px; border-left: 4px solid #ff4b4b; font-size: 0.9em; }
+    .metric-card { background-color: #262730; padding: 15px; border-radius: 10px; border: 1px solid #41444b; text-align: center; }
+    h1, h2, h3 { color: #ff4b4b !important; }
+    .good-value { color: #4CAF50; font-weight: bold; }
+    .bad-value { color: #FF5252; font-weight: bold; }
     </style>
     """, unsafe_allow_html=True)
 
 # --- 2. DATA FUNCTIONS ---
 
 def normalize_name(name):
-    """
-    Converts 'Luka Dončić' -> 'Luka Doncic' to ensure matching works.
-    """
-    if not isinstance(name, str):
-        return str(name)
-    return ''.join(c for c in unicodedata.normalize('NFD', name)
-                  if unicodedata.category(c) != 'Mn')
+    if not isinstance(name, str): return str(name)
+    # Remove punctuation and accents (Luka Dončić -> Luka Doncic)
+    norm = ''.join(c for c in unicodedata.normalize('NFD', name) if unicodedata.category(c) != 'Mn')
+    # Remove suffixes like " Jr." or " Sr." or " III" to match DK names
+    norm = norm.replace(" Jr.", "").replace(" Sr.", "").replace(" II", "").replace(" III", "").replace(" IV", "")
+    return norm.strip().lower()
 
 @st.cache_data
 def get_injury_report():
     try:
-        # Use a fake browser header to avoid getting blocked
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36'}
         url = "https://www.cbssports.com/nba/injuries/"
-        
         response = requests.get(url, headers=headers)
         dfs = pd.read_html(response.text)
         injury_df = pd.concat(dfs)
-        
-        # Clean up names
         injury_df['Player'] = injury_df['Player'].apply(normalize_name)
-        
-        # Filter for players who are OUT or DOUBTFUL
-        # Note: We filter strictly. 'Questionable' players are kept in the pool.
         out_mask = injury_df['Injury Status'].str.contains('Out|Doubtful|Injured Reserve', case=False, na=False)
-        out_players = injury_df[out_mask]['Player'].tolist()
-        
-        return out_players
-    except Exception as e:
-        # Return empty list but logging error would happen here in production
+        return injury_df[out_mask]['Player'].tolist()
+    except:
         return []
 
 @st.cache_data
 def get_daily_schedule():
     est = pytz.timezone('US/Eastern')
     today_str = datetime.now(est).strftime('%Y-%m-%d')
-    
     try:
         board = scoreboardv2.ScoreboardV2(game_date=today_str)
         header = board.game_header.get_data_frame()
         linescore = board.line_score.get_data_frame()
-        
         if header.empty: return pd.DataFrame(), []
-            
         team_map = pd.Series(linescore.TEAM_ABBREVIATION.values, index=linescore.TEAM_ID).to_dict()
-        
         games = []
         for _, row in header.iterrows():
-            home_id = row['HOME_TEAM_ID']
-            away_id = row['VISITOR_TEAM_ID']
-            status = row['GAME_STATUS_TEXT'].strip()
-            games.append({
-                "Matchup": f"{team_map.get(away_id, '???')} @ {team_map.get(home_id, '???')}",
-                "Status": status
-            })
-            
+            home = team_map.get(row['HOME_TEAM_ID'], '???')
+            away = team_map.get(row['VISITOR_TEAM_ID'], '???')
+            games.append({"Matchup": f"{away} @ {home}", "Status": row['GAME_STATUS_TEXT'].strip()})
         return pd.DataFrame(games), header['HOME_TEAM_ID'].tolist() + header['VISITOR_TEAM_ID'].tolist()
     except:
         return pd.DataFrame(), []
 
 @st.cache_data
 def get_roster_players(team_ids):
-    active_player_ids = []
+    active_ids = []
     for tid in team_ids:
         try:
             roster = commonteamroster.CommonTeamRoster(team_id=tid).get_data_frames()[0]
-            active_player_ids.extend(roster['PLAYER_ID'].tolist())
-        except:
-            continue
-    return active_player_ids
+            active_ids.extend(roster['PLAYER_ID'].tolist())
+        except: continue
+    return active_ids
 
 def calculate_dk_points(row):
-    pts = row['PTS']
-    fg3m = row['FG3M']
-    reb = row['REB']
-    ast = row['AST']
-    stl = row['STL']
-    blk = row['BLK']
-    tov = row['TOV']
-    score = (pts * 1) + (fg3m * 0.5) + (reb * 1.25) + (ast * 1.5) + (stl * 2) + (blk * 2) - (tov * 0.5)
-    
-    double_digits = sum(1 for s in [pts, reb, ast, stl, blk] if s >= 10)
+    score = (row['PTS']) + (row['FG3M'] * 0.5) + (row['REB'] * 1.25) + (row['AST'] * 1.5) + (row['STL'] * 2) + (row['BLK'] * 2) - (row['TOV'] * 0.5)
+    double_digits = sum(1 for s in [row['PTS'], row['REB'], row['AST'], row['STL'], row['BLK']] if s >= 10)
     if double_digits >= 3: score += 3
     elif double_digits >= 2: score += 1.5
     return score
@@ -135,12 +94,10 @@ def load_and_process_data():
         try:
             logs = playergamelogs.PlayerGameLogs(season_nullable=season).get_data_frames()[0]
             dfs.append(logs)
-        except:
-            pass 
+        except: pass
     
     if not dfs: return pd.DataFrame()
     df = pd.concat(dfs, ignore_index=True)
-    
     df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'])
     df = df.sort_values(by=['PLAYER_ID', 'GAME_DATE'])
     df['MIN'] = pd.to_numeric(df['MIN'], errors='coerce')
@@ -149,11 +106,10 @@ def load_and_process_data():
     df['DAYS_REST'] = df.groupby('PLAYER_ID')['GAME_DATE'].diff().dt.days - 1
     df['DAYS_REST'] = df['DAYS_REST'].fillna(3).clip(lower=0, upper=7)
 
-    stats_to_roll = ['MIN', 'PTS', 'REB', 'AST', 'FGA', 'DK_PTS']
-    for col in stats_to_roll:
-        df[f'L5_{col}'] = df.groupby('PLAYER_ID')[col].transform(lambda x: x.shift(1).rolling(window=5, min_periods=1).mean())
-        df[f'L10_{col}'] = df.groupby('PLAYER_ID')[col].transform(lambda x: x.shift(1).rolling(window=10, min_periods=1).mean())
-
+    stats = ['MIN', 'PTS', 'REB', 'AST', 'FGA', 'DK_PTS']
+    for col in stats:
+        df[f'L5_{col}'] = df.groupby('PLAYER_ID')[col].transform(lambda x: x.shift(1).rolling(5, min_periods=1).mean())
+        df[f'L10_{col}'] = df.groupby('PLAYER_ID')[col].transform(lambda x: x.shift(1).rolling(10, min_periods=1).mean())
     return df.dropna()
 
 # --- 3. UI LAYOUT ---
@@ -167,22 +123,20 @@ schedule_df, active_teams = get_daily_schedule()
 st.session_state['schedule_df'] = schedule_df
 st.session_state['active_teams'] = active_teams
 
-# SIDEBAR
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/en/0/03/National_Basketball_Association_logo.svg", width=80)
     st.title("CourtVision DFS")
     
+    # --- NEW: SALARY UPLOAD ---
+    st.markdown("### 💰 Salary Data")
+    salary_file = st.file_uploader("Upload DKSalaries.csv", type=['csv'])
+    
     st.markdown("### 📅 Today's Games")
     if not schedule_df.empty:
         for _, game in schedule_df.iterrows():
-            st.markdown(f"""
-            <div class="game-card">
-                <b>{game['Matchup']}</b><br>
-                <span style="color: #bbb; font-size: 0.8em;">{game['Status']}</span>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f"<div class='game-card'><b>{game['Matchup']}</b><br><span style='color:#bbb'>{game['Status']}</span></div>", unsafe_allow_html=True)
     else:
-        st.info("No games scheduled today.")
+        st.info("No games scheduled.")
     
     st.markdown("---")
     run_btn = st.button("🚀 Run Prediction Model", type="primary", use_container_width=True)
@@ -193,109 +147,149 @@ st.title("🏀 NBA Daily Fantasy Predictor")
 
 if run_btn:
     if not active_teams:
-        st.error("❌ No games found for today! Check the sidebar schedule.")
+        st.error("❌ No games found for today!")
     else:
-        status_col1, status_col2, status_col3 = st.columns(3)
+        status1, status2, status3 = st.columns(3)
+        with status1: st.metric("Games Today", len(active_teams) // 2)
         
-        with status_col1:
-            st.metric("Games Today", len(active_teams) // 2)
-
-        active_roster_player_ids = []
-        with st.spinner("Fetching Live Rosters..."):
-            active_roster_player_ids = get_roster_players(active_teams)
-
-        if not active_roster_player_ids:
-            st.error("⚠️ Error: Found teams playing, but could not retrieve Roster Data from NBA API. Try clicking Run again.")
+        # Rosters & Injuries
+        active_ids = []
+        with st.spinner("Fetching Rosters..."): active_ids = get_roster_players(active_teams)
+        
+        if not active_ids:
+            st.error("⚠️ API Error: Could not fetch rosters.")
         else:
-            with status_col2:
+            with status2:
                 with st.spinner("Checking Injuries..."):
-                    injured_players = get_injury_report()
-                    st.metric("Injured Players", len(injured_players))
-                    
-                    if len(injured_players) == 0:
-                        st.warning("⚠️ Warning: Injury Report empty. Data source might be blocked.")
-
-            with status_col3:
-                st.metric("Model Status", "Active", delta="Ready", delta_color="normal")
-
-            with st.spinner("Crunching the numbers (XGBoost)..."):
+                    injured_list = get_injury_report()
+                    st.metric("Injured Players", len(injured_list))
+            
+            with status3: st.metric("Model Status", "Ready")
+            
+            with st.spinner("Running XGBoost Model..."):
                 df = load_and_process_data()
                 
                 if not df.empty:
+                    # Model Training
                     features = ['L5_DK_PTS', 'L10_DK_PTS', 'L5_MIN', 'L10_MIN', 'DAYS_REST', 'L5_FGA', 'L10_FGA']
-                    X = df[features]
-                    y = df['DK_PTS']
-                    
                     model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=150, learning_rate=0.1)
-                    model.fit(X, y)
+                    model.fit(df[features], df['DK_PTS'])
                     
-                    latest_stats = df.groupby('PLAYER_ID').tail(1).copy()
+                    # Prediction DataFrame
+                    latest = df.groupby('PLAYER_ID').tail(1).copy()
+                    latest['PLAYER_NAME_NORM'] = latest['PLAYER_NAME'].apply(normalize_name)
                     
-                    # --- NORMALIZE NAMES FOR MATCHING ---
-                    # Create a normalized name column for filtering
-                    latest_stats['PLAYER_NAME_NORM'] = latest_stats['PLAYER_NAME'].apply(normalize_name)
+                    mask_active = latest['PLAYER_ID'].isin(active_ids)
+                    mask_injury = ~latest['PLAYER_NAME_NORM'].isin(injured_list) if not show_injured else True
                     
-                    active_mask = latest_stats['PLAYER_ID'].isin(active_roster_player_ids)
+                    slate = latest[mask_active & mask_injury].copy()
                     
-                    # Filter Injuries (using normalized names)
-                    if not show_injured:
-                        injury_mask = ~latest_stats['PLAYER_NAME_NORM'].isin(injured_players)
-                    else:
-                        # If show_injured is True, we include everyone (mask is all True)
-                        injury_mask = pd.Series([True] * len(latest_stats), index=latest_stats.index)
-                    
-                    todays_slate = latest_stats[active_mask & injury_mask].copy()
-                    
-                    if not todays_slate.empty:
-                        todays_slate['Proj_DK_PTS'] = model.predict(todays_slate[features])
-                        todays_slate = todays_slate.sort_values(by='Proj_DK_PTS', ascending=False)
+                    if not slate.empty:
+                        slate['Proj_DK_PTS'] = model.predict(slate[features])
                         
-                        st.markdown("### 🔥 Top 3 Projected Plays")
-                        col1, col2, col3 = st.columns(3)
-                        top_3 = todays_slate.head(3).itertuples()
-                        
-                        def player_card(col, player):
-                            with col:
-                                img_url = f"https://cdn.nba.com/headshots/nba/latest/1040x760/{player.PLAYER_ID}.png"
-                                st.image(img_url, use_column_width=True)
-                                st.markdown(f"<h3 style='text-align: center;'>{player.PLAYER_NAME}</h3>", unsafe_allow_html=True)
-                                st.markdown(f"<h2 style='text-align: center; color: #4CAF50;'>{player.Proj_DK_PTS:.1f} PTS</h2>", unsafe_allow_html=True)
+                        # --- MERGE SALARIES IF UPLOADED ---
+                        if salary_file is not None:
+                            try:
+                                salaries = pd.read_csv(salary_file)
+                                # DK CSV usually has 'Name', 'Salary'
+                                salaries['Name_Norm'] = salaries['Name'].apply(normalize_name)
+                                slate = slate.merge(salaries[['Name_Norm', 'Salary', 'Name']], 
+                                                  left_on='PLAYER_NAME_NORM', 
+                                                  right_on='Name_Norm', 
+                                                  how='left')
+                                
+                                slate['Salary'] = slate['Salary'].fillna(0)
+                                # Calculate Value: Proj Points / (Salary / 1000)
+                                # Avoid division by zero
+                                slate['Value'] = slate.apply(lambda x: x['Proj_DK_PTS'] / (x['Salary']/1000) if x['Salary'] > 0 else 0, axis=1)
+                            except Exception as e:
+                                st.warning(f"Error processing salary file: {e}")
+                                slate['Salary'] = 0
+                                slate['Value'] = 0
+                        else:
+                            slate['Salary'] = 0
+                            slate['Value'] = 0
 
-                        players = list(top_3)
-                        if len(players) >= 1: player_card(col1, players[0])
-                        if len(players) >= 2: player_card(col2, players[1])
-                        if len(players) >= 3: player_card(col3, players[2])
+                        # --- LIST GENERATION ---
+                        slate = slate.sort_values(by='Proj_DK_PTS', ascending=False)
+                        
+                        # 1. Top Scorers
+                        top_scorers = slate.head(3)
+                        
+                        # 2. Top Value (Must have >15 points proj to avoid scrubs)
+                        top_value = slate[slate['Proj_DK_PTS'] > 15].sort_values(by='Value', ascending=False).head(3)
+                        
+                        # 3. Bad Plays (Salary > 6000 but Lowest Value)
+                        bad_plays = slate[slate['Salary'] > 6000].sort_values(by='Value', ascending=True).head(3)
+
+                        # --- DISPLAY SECTIONS ---
+                        
+                        # Helper for Player Cards
+                        def draw_card(player, label_type="points"):
+                            img = f"https://cdn.nba.com/headshots/nba/latest/1040x760/{player.PLAYER_ID}.png"
+                            st.markdown(f"""
+                            <div style="text-align:center; background-color:#262730; padding:10px; border-radius:10px; border:1px solid #444;">
+                                <img src="{img}" style="width:100px; border-radius:50%;">
+                                <h4>{player.PLAYER_NAME}</h4>
+                                <div style="display:flex; justify-content:space-between; padding:0 20px;">
+                                    <span>💰 ${int(player.Salary)}</span>
+                                    <span>📊 {player.Proj_DK_PTS:.1f}</span>
+                                </div>
+                                <h3 style="color: {'#4CAF50' if label_type!='bad' else '#FF5252'}; margin-top:5px;">
+                                    {player.Value:.1f}x Value
+                                </h3>
+                            </div>
+                            """, unsafe_allow_html=True)
+
+                        st.markdown("### 🏆 Top 3 Projected Scorers")
+                        c1, c2, c3 = st.columns(3)
+                        for idx, col in enumerate([c1, c2, c3]):
+                            if idx < len(top_scorers): draw_card(top_scorers.iloc[idx])
+
+                        if salary_file:
+                            st.markdown("---")
+                            col_v, col_b = st.columns(2)
+                            
+                            with col_v:
+                                st.markdown("### 💎 Top 3 Value Plays")
+                                st.caption("Best bang for your buck (Projections > 15 pts)")
+                                for i in range(len(top_value)):
+                                    draw_card(top_value.iloc[i], "value")
+                                    st.write("") # Spacer
+
+                            with col_b:
+                                st.markdown("### 🛑 Top 3 Fades (Bad Value)")
+                                st.caption("Expensive players (> $6k) with low projections")
+                                for i in range(len(bad_plays)):
+                                    draw_card(bad_plays.iloc[i], "bad")
+                                    st.write("") # Spacer
 
                         st.markdown("---")
-
-                        tab1, tab2 = st.tabs(["📋 Full Rankings", "📊 Team Breakdown"])
                         
+                        # MAIN TABLE
+                        tab1, tab2 = st.tabs(["📋 Full Rankings", "📊 Team Breakdown"])
                         with tab1:
-                            search = st.text_input("🔍 Search Player or Team", "")
+                            search = st.text_input("🔍 Search Player", "")
+                            cols = ['PLAYER_NAME', 'TEAM_ABBREVIATION', 'Salary', 'Proj_DK_PTS', 'Value', 'L5_DK_PTS', 'DAYS_REST']
                             
-                            display_cols = ['PLAYER_NAME', 'TEAM_ABBREVIATION', 'Proj_DK_PTS', 'L5_DK_PTS', 'DAYS_REST']
-                            display_df = todays_slate[display_cols].copy().reset_index(drop=True)
-                            
+                            show_df = slate[cols].copy().reset_index(drop=True)
                             if search:
-                                display_df = display_df[
-                                    display_df['PLAYER_NAME'].str.contains(search, case=False) | 
-                                    display_df['TEAM_ABBREVIATION'].str.contains(search, case=False)
-                                ]
+                                show_df = show_df[show_df['PLAYER_NAME'].str.contains(search, case=False)]
                             
-                            try:
-                                styled_df = display_df.style\
-                                    .format({'Proj_DK_PTS': '{:.1f}', 'L5_DK_PTS': '{:.1f}', 'DAYS_REST': '{:.0f}'})\
-                                    .background_gradient(subset=['Proj_DK_PTS'], cmap='Greens')
-                            except:
-                                styled_df = display_df.style\
-                                    .format({'Proj_DK_PTS': '{:.1f}', 'L5_DK_PTS': '{:.1f}', 'DAYS_REST': '{:.0f}'})
-                            
-                            st.dataframe(styled_df, use_container_width=True, height=800)
-                            
+                            st.dataframe(
+                                show_df.style.format({
+                                    'Salary': '${:.0f}', 
+                                    'Proj_DK_PTS': '{:.1f}', 
+                                    'Value': '{:.2f}x',
+                                    'L5_DK_PTS': '{:.1f}',
+                                    'DAYS_REST': '{:.0f}'
+                                }).background_gradient(subset=['Value'], cmap='RdYlGn', vmin=3, vmax=6),
+                                use_container_width=True, height=800
+                            )
+                        
                         with tab2:
-                            team_proj = todays_slate.groupby('TEAM_ABBREVIATION')['Proj_DK_PTS'].sum().sort_values(ascending=False)
+                            team_proj = slate.groupby('TEAM_ABBREVIATION')['Proj_DK_PTS'].sum().sort_values(ascending=False)
                             st.bar_chart(team_proj)
-                    else:
-                        st.warning("No players found matching today's rosters.")
+
                 else:
-                    st.error("Error: Could not load historical player data.")
+                    st.error("Error: No historical data available.")

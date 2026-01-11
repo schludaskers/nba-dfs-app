@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import xgboost as xgb
+import requests
+import unicodedata
 from datetime import datetime
 import pytz 
 from nba_api.stats.endpoints import playergamelogs, scoreboardv2, commonteamroster
@@ -36,15 +38,39 @@ st.markdown("""
 
 # --- 2. DATA FUNCTIONS ---
 
+def normalize_name(name):
+    """
+    Converts 'Luka Dončić' -> 'Luka Doncic' to ensure matching works.
+    """
+    if not isinstance(name, str):
+        return str(name)
+    return ''.join(c for c in unicodedata.normalize('NFD', name)
+                  if unicodedata.category(c) != 'Mn')
+
 @st.cache_data
 def get_injury_report():
     try:
+        # Use a fake browser header to avoid getting blocked
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
         url = "https://www.cbssports.com/nba/injuries/"
-        dfs = pd.read_html(url)
+        
+        response = requests.get(url, headers=headers)
+        dfs = pd.read_html(response.text)
         injury_df = pd.concat(dfs)
-        out_players = injury_df[injury_df['Injury Status'].str.contains('Out', case=False, na=False)]
-        return out_players['Player'].tolist()
-    except:
+        
+        # Clean up names
+        injury_df['Player'] = injury_df['Player'].apply(normalize_name)
+        
+        # Filter for players who are OUT or DOUBTFUL
+        # Note: We filter strictly. 'Questionable' players are kept in the pool.
+        out_mask = injury_df['Injury Status'].str.contains('Out|Doubtful|Injured Reserve', case=False, na=False)
+        out_players = injury_df[out_mask]['Player'].tolist()
+        
+        return out_players
+    except Exception as e:
+        # Return empty list but logging error would happen here in production
         return []
 
 @st.cache_data
@@ -113,7 +139,6 @@ def load_and_process_data():
             pass 
     
     if not dfs: return pd.DataFrame()
-    # ignore_index=True FIXES the duplicate index issue at the source
     df = pd.concat(dfs, ignore_index=True)
     
     df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'])
@@ -186,6 +211,9 @@ if run_btn:
                 with st.spinner("Checking Injuries..."):
                     injured_players = get_injury_report()
                     st.metric("Injured Players", len(injured_players))
+                    
+                    if len(injured_players) == 0:
+                        st.warning("⚠️ Warning: Injury Report empty. Data source might be blocked.")
 
             with status_col3:
                 st.metric("Model Status", "Active", delta="Ready", delta_color="normal")
@@ -203,8 +231,18 @@ if run_btn:
                     
                     latest_stats = df.groupby('PLAYER_ID').tail(1).copy()
                     
+                    # --- NORMALIZE NAMES FOR MATCHING ---
+                    # Create a normalized name column for filtering
+                    latest_stats['PLAYER_NAME_NORM'] = latest_stats['PLAYER_NAME'].apply(normalize_name)
+                    
                     active_mask = latest_stats['PLAYER_ID'].isin(active_roster_player_ids)
-                    injury_mask = ~latest_stats['PLAYER_NAME'].isin(injured_players) if not show_injured else True
+                    
+                    # Filter Injuries (using normalized names)
+                    if not show_injured:
+                        injury_mask = ~latest_stats['PLAYER_NAME_NORM'].isin(injured_players)
+                    else:
+                        # If show_injured is True, we include everyone (mask is all True)
+                        injury_mask = pd.Series([True] * len(latest_stats), index=latest_stats.index)
                     
                     todays_slate = latest_stats[active_mask & injury_mask].copy()
                     
@@ -235,8 +273,6 @@ if run_btn:
                         with tab1:
                             search = st.text_input("🔍 Search Player or Team", "")
                             
-                            # --- ERROR FIX: RESET INDEX ---
-                            # Resetting index here ensures we don't have duplicate rows causing the crash
                             display_cols = ['PLAYER_NAME', 'TEAM_ABBREVIATION', 'Proj_DK_PTS', 'L5_DK_PTS', 'DAYS_REST']
                             display_df = todays_slate[display_cols].copy().reset_index(drop=True)
                             

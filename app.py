@@ -3,7 +3,7 @@ import pandas as pd
 import xgboost as xgb
 import requests
 import unicodedata
-import difflib  # Built-in library for fuzzy matching
+import difflib
 from datetime import datetime
 import pytz 
 from nba_api.stats.endpoints import playergamelogs, scoreboardv2, commonteamroster
@@ -29,7 +29,7 @@ st.markdown("""
 
 def normalize_name(name):
     """
-     aggressive normalization to fix 'P.J. Washington' vs 'PJ Washington'
+    Aggressively cleans names to ensure 'Luka Dončić' matches 'Luka Doncic'
     """
     if not isinstance(name, str): return str(name)
     
@@ -39,47 +39,37 @@ def normalize_name(name):
     # 2. Lowercase
     norm = norm.lower()
     
-    # 3. Remove generic suffixes
+    # 3. Remove common suffixes
     suffixes = [" jr.", " sr.", " ii", " iii", " iv", " jr", " sr"]
     for s in suffixes:
         if norm.endswith(s):
             norm = norm[:-len(s)]
             
-    # 4. Remove ALL punctuation (dots, apostrophes, hyphens)
-    # This turns "Shaivonte Aician Gilgeous-Alexander" -> "shaivonte aician gilgeousalexander"
-    # But usually we just want to fix "O'Neale" -> "oneale" or "C.J." -> "cj"
+    # 4. Remove punctuation
     norm = norm.replace(".", "").replace("'", "").replace("-", " ")
     
     return norm.strip()
 
 def smart_map_names(api_names, salary_names):
-    """
-    Returns a dictionary mapping {API_Name -> Salary_Name}
-    Uses exact match first, then fuzzy match.
-    """
+    """Maps API names to Salary CSV names using fuzzy matching."""
     mapping = {}
-    
-    # Create lookup for normalized salary names
     salary_norm_map = {normalize_name(name): name for name in salary_names}
     salary_norm_list = list(salary_norm_map.keys())
     
     for api_name in api_names:
         norm_api = normalize_name(api_name)
-        
-        # 1. Exact Match
         if norm_api in salary_norm_map:
             mapping[api_name] = salary_norm_map[norm_api]
         else:
-            # 2. Fuzzy Match (cutoff 0.8 means 80% similar)
             matches = difflib.get_close_matches(norm_api, salary_norm_list, n=1, cutoff=0.8)
             if matches:
-                matched_salary_name = salary_norm_map[matches[0]]
-                mapping[api_name] = matched_salary_name
+                mapping[api_name] = salary_norm_map[matches[0]]
                 
     return mapping
 
 @st.cache_data
 def get_injury_report():
+    """Scrapes CBS Sports for the latest injury report."""
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36'}
         url = "https://www.cbssports.com/nba/injuries/"
@@ -87,12 +77,14 @@ def get_injury_report():
         dfs = pd.read_html(response.text)
         injury_df = pd.concat(dfs)
         
-        # Normalize injury names too!
+        # Normalize names
         injury_df['Player_Norm'] = injury_df['Player'].apply(normalize_name)
         
+        # Filter strictly for OUT/DOUBTFUL
         out_mask = injury_df['Injury Status'].str.contains('Out|Doubtful|Injured Reserve', case=False, na=False)
         return injury_df[out_mask]['Player_Norm'].tolist()
-    except:
+    except Exception as e:
+        print(f"Injury Scrape Error: {e}")
         return []
 
 @st.cache_data
@@ -175,6 +167,9 @@ with st.sidebar:
     st.markdown("### 💰 Salary Data")
     salary_file = st.file_uploader("Upload DKSalaries.csv", type=['csv'])
     
+    st.markdown("### 🛠️ Manual Controls")
+    manual_remove = st.text_input("Force Remove Player (Partial Name)", placeholder="e.g. Embiid")
+    
     st.markdown("### 📅 Today's Games")
     if not schedule_df.empty:
         for _, game in schedule_df.iterrows():
@@ -206,7 +201,7 @@ if run_btn:
                 with st.spinner("Checking Injuries..."):
                     # Get normalized injury list
                     injured_list_norm = get_injury_report()
-                    st.metric("Injured Players", len(injured_list_norm))
+                    st.metric("Injured Players Found", len(injured_list_norm))
             
             with status3: st.metric("Model Status", "Ready")
             
@@ -220,19 +215,24 @@ if run_btn:
                     
                     latest = df.groupby('PLAYER_ID').tail(1).copy()
                     
-                    # Pre-calculate normalized names for everything
+                    # Pre-calculate normalized names
                     latest['PLAYER_NAME_NORM'] = latest['PLAYER_NAME'].apply(normalize_name)
                     
+                    # 1. Filter Active Teams
                     mask_active = latest['PLAYER_ID'].isin(active_ids)
-                    
-                    # Injury Check (using normalized names)
+                    slate = latest[mask_active].copy()
+
+                    # 2. Filter Injuries
                     if not show_injured:
-                        mask_injury = ~latest['PLAYER_NAME_NORM'].isin(injured_list_norm)
-                    else:
-                        mask_injury = [True] * len(latest)
-                    
-                    slate = latest[mask_active & mask_injury].copy()
-                    
+                        # Auto-scraper filter
+                        mask_auto_injury = ~slate['PLAYER_NAME_NORM'].isin(injured_list_norm)
+                        slate = slate[mask_auto_injury]
+                        
+                        # Manual Force Remove filter
+                        if manual_remove:
+                            manual_norm = normalize_name(manual_remove)
+                            slate = slate[~slate['PLAYER_NAME_NORM'].str.contains(manual_norm)]
+
                     if not slate.empty:
                         slate['Proj_DK_PTS'] = model.predict(slate[features])
                         
@@ -240,30 +240,28 @@ if run_btn:
                         if salary_file is not None:
                             try:
                                 salaries = pd.read_csv(salary_file)
-                                # Clean Salary Column
-                                # Sometimes it's 'Salary', sometimes 'Salary ($)'
-                                if 'Salary' not in salaries.columns:
-                                    st.error("CSV must have a 'Salary' column.")
-                                    slate['Salary'] = 0
-                                else:
-                                    # Create the map using fuzzy logic
+                                if 'Salary' in salaries.columns:
+                                    # Create map
                                     api_names = slate['PLAYER_NAME'].unique().tolist()
                                     salary_names = salaries['Name'].unique().tolist()
-                                    
-                                    # Generate {API Name : Salary Name} map
                                     name_mapping = smart_map_names(api_names, salary_names)
                                     
-                                    # Apply map to slate
+                                    # Apply map
                                     slate['Matched_Name'] = slate['PLAYER_NAME'].map(name_mapping)
                                     
-                                    # Merge on the MATCHED name
+                                    # Merge
                                     slate = slate.merge(salaries[['Name', 'Salary']], 
                                                       left_on='Matched_Name', 
                                                       right_on='Name', 
                                                       how='left')
                                     
-                                    slate['Salary'] = slate['Salary'].fillna(0)
-                                    slate['Value'] = slate.apply(lambda x: x['Proj_DK_PTS'] / (x['Salary']/1000) if x['Salary'] > 0 else 0, axis=1)
+                                    # --- THE FIX: FILTER ZERO SALARIES ---
+                                    slate = slate[slate['Salary'] > 0]
+                                    slate['Value'] = slate.apply(lambda x: x['Proj_DK_PTS'] / (x['Salary']/1000), axis=1)
+                                else:
+                                    st.error("CSV missing 'Salary' column")
+                                    slate['Salary'] = 0
+                                    slate['Value'] = 0
                             except Exception as e:
                                 st.warning(f"Error processing salary file: {e}")
                                 slate['Salary'] = 0
@@ -312,7 +310,7 @@ if run_btn:
 
                         st.markdown("---")
                         
-                        tab1, tab2, tab3 = st.tabs(["📋 Rankings", "📊 Teams", "🛠️ Debug Matcher"])
+                        tab1, tab2, tab3 = st.tabs(["📋 Rankings", "📊 Teams", "🛠️ Injury Debug"])
                         
                         with tab1:
                             search = st.text_input("🔍 Search", "")
@@ -325,12 +323,9 @@ if run_btn:
                             st.bar_chart(slate.groupby('TEAM_ABBREVIATION')['Proj_DK_PTS'].sum().sort_values(ascending=False))
                             
                         with tab3:
-                            st.write("This tab shows how the app matched API names to Salary CSV names.")
-                            if salary_file:
-                                match_debug = slate[['PLAYER_NAME', 'Matched_Name', 'Salary']].copy()
-                                match_debug = match_debug[match_debug['PLAYER_NAME'] != match_debug['Matched_Name']]
-                                st.dataframe(match_debug)
-                                st.caption("Only showing names that were fuzzy matched.")
+                            st.write("If you see an injured player in your rankings, look for their name in this list.")
+                            st.write(f"Total Injured Players Found: {len(injured_list_norm)}")
+                            st.write(injured_list_norm)
 
                 else:
                     st.error("Error: No historical data available.")

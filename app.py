@@ -5,6 +5,7 @@ import requests
 import unicodedata
 import difflib
 import io
+import textwrap
 from datetime import datetime
 import pytz 
 from nba_api.stats.endpoints import playergamelogs, scoreboardv2, commonteamroster
@@ -52,6 +53,7 @@ def smart_map_names(api_names, salary_names):
         if norm_api in salary_norm_map:
             mapping[api_name] = salary_norm_map[norm_api]
         else:
+            # Force first letter match + 90% similarity
             candidates = [n for n in salary_norm_list if n.startswith(norm_api[0])]
             matches = difflib.get_close_matches(norm_api, candidates, n=1, cutoff=0.90)
             if matches:
@@ -60,34 +62,42 @@ def smart_map_names(api_names, salary_names):
 
 @st.cache_data
 def get_injury_report():
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
+    """
+    STRICT ESPN SCRAPER
+    - Grabs ALL tables from espn.com/nba/injuries
+    - forces Col 0 -> Player, Col 1 -> Status
+    """
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    url = "https://www.espn.com/nba/injuries"
     
-    # Try CBS
     try:
-        url = "https://www.cbssports.com/nba/injuries/"
-        response = requests.get(url, headers=headers, timeout=5)
+        response = requests.get(url, headers=headers, timeout=10)
+        # ESPN has 30 separate tables (one per team)
         dfs = pd.read_html(io.StringIO(response.text))
-        injury_df = pd.concat(dfs)
-        injury_df['Player_Norm'] = injury_df['Player'].apply(normalize_name)
-        return injury_df[['Player_Norm', 'Injury Status']]
-    except: pass
-    
-    # Try ESPN
-    try:
-        url = "https://www.espn.com/nba/injuries"
-        response = requests.get(url, headers=headers, timeout=5)
-        dfs = pd.read_html(io.StringIO(response.text))
+        
         all_injuries = []
         for df in dfs:
-            if 'NAME' in df.columns and 'STATUS' in df.columns:
-                temp = df[['NAME', 'STATUS']].copy()
-                temp.rename(columns={'NAME': 'Player', 'STATUS': 'Injury Status'}, inplace=True)
-                all_injuries.append(temp)
+            # Basic validation: Table must have at least 2 columns (Name, Status)
+            if len(df.columns) >= 2:
+                # Force rename the first two columns regardless of what ESPN calls them
+                # This fixes issues where 'NAME' header is missing
+                clean_df = df.iloc[:, :2].copy()
+                clean_df.columns = ['Player', 'Injury Status']
+                
+                # Filter out header rows that got scraped as data
+                clean_df = clean_df[clean_df['Player'] != 'NAME']
+                clean_df = clean_df[clean_df['Player'] != 'Player']
+                
+                all_injuries.append(clean_df)
+        
         if all_injuries:
             combined = pd.concat(all_injuries)
             combined['Player_Norm'] = combined['Player'].apply(normalize_name)
+            # Standardize status text
             return combined[['Player_Norm', 'Injury Status']]
-    except: pass
+            
+    except Exception as e:
+        print(f"ESPN Error: {e}")
 
     return pd.DataFrame(columns=['Player_Norm', 'Injury Status'])
 
@@ -190,12 +200,17 @@ if run_btn:
             st.error("⚠️ API Error: Could not fetch rosters.")
         else:
             with status2:
-                with st.spinner("Checking Injuries..."):
+                with st.spinner("Checking Injuries (ESPN)..."):
                     injury_df = get_injury_report()
+                    
                     if not injury_df.empty:
+                        # Define what counts as "Injured" for exclusion
+                        # For display, we keep everything. For filtering, we look for Out/Doubtful.
+                        status_map = dict(zip(injury_df['Player_Norm'], injury_df['Injury Status']))
+                        
+                        # Calculate count of strictly OUT players
                         exclude_mask = injury_df['Injury Status'].str.contains('Out|Doubtful|Injured Reserve', case=False, na=False)
                         injured_list_norm = injury_df[exclude_mask]['Player_Norm'].tolist()
-                        status_map = dict(zip(injury_df['Player_Norm'], injury_df['Injury Status']))
                     else:
                         injured_list_norm = []
                         status_map = {}
@@ -228,6 +243,7 @@ if run_btn:
 
                     if not slate.empty:
                         slate['Proj_DK_PTS'] = model.predict(slate[features])
+                        # Map injury status to the slate
                         slate['Injury Status'] = slate['PLAYER_NAME_NORM'].map(status_map).fillna("")
 
                         if salary_file is not None:
@@ -240,13 +256,11 @@ if run_btn:
                                     slate['Matched_Name'] = slate['PLAYER_NAME'].map(name_mapping)
                                     slate = slate.merge(salaries[['Name', 'Salary']], left_on='Matched_Name', right_on='Name', how='left')
                                     
-                                    # Fix: Ensure types are numeric before filtering
                                     slate['Salary'] = pd.to_numeric(slate['Salary'], errors='coerce').fillna(0)
                                     slate['Proj_DK_PTS'] = pd.to_numeric(slate['Proj_DK_PTS'], errors='coerce').fillna(0)
                                     
                                     slate = slate[slate['Salary'] > 0]
                                     
-                                    # Fix: Strict Filter for the "Kyrie @ $3000" Glitch
                                     bad_match_mask = (slate['Proj_DK_PTS'] > 30) & (slate['Salary'] < 4000)
                                     if bad_match_mask.any():
                                         st.toast(f"⚠️ Removed {bad_match_mask.sum()} suspicious matches", icon="🧹")
@@ -264,26 +278,25 @@ if run_btn:
                         top_value = slate[slate['Proj_DK_PTS'] > 18].sort_values(by='Value', ascending=False).head(3)
                         bad_plays = slate[slate['Salary'] > 6000].sort_values(by='Value', ascending=True).head(3)
 
-                        # --- FIX: FLAT HTML STRING CONSTRUCTION ---
                         def draw_card(player, label_type="points"):
                             img = f"https://cdn.nba.com/headshots/nba/latest/1040x760/{player.PLAYER_ID}.png"
                             status_html = f"<div style='color:#FFC107; font-size:0.8em; margin-bottom:5px;'>⚠️ {player['Injury Status']}</div>" if player['Injury Status'] else ""
                             color = '#4CAF50' if label_type!='bad' else '#FF5252'
                             
-                            # Flattened HTML string (No indents to break markdown)
-                            card_html = (
-                                f'<div style="text-align:center; background-color:#262730; padding:15px; border-radius:12px; border:1px solid #444; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">'
-                                f'<img src="{img}" style="width:90px; height:90px; border-radius:50%; border: 2px solid #333; margin-bottom:10px; object-fit: cover;" onerror="this.onerror=null; this.src=\'https://cdn.nba.com/headshots/nba/latest/1040x760/fallback.png\'">'
-                                f'<div style="font-weight:bold; font-size:1.1em; margin-bottom:5px;">{player.PLAYER_NAME}</div>'
-                                f'{status_html}'
-                                f'<div style="display:flex; justify-content:space-between; background:#1e1e24; padding:8px 12px; border-radius:6px; margin-top:8px;">'
-                                f'<span style="color:#ddd;">💰 ${int(player.Salary)}</span>'
-                                f'<span style="color:#fff; font-weight:bold;">📊 {player.Proj_DK_PTS:.1f}</span>'
-                                f'</div>'
-                                f'<div style="color: {color}; font-size:1.4em; font-weight:800; margin-top:10px;">'
-                                f'{player.Value:.1f}x <span style="font-size:0.6em; font-weight:normal; color:#aaa;">VAL</span>'
-                                f'</div></div>'
-                            )
+                            card_html = textwrap.dedent(f"""
+                                <div style="text-align:center; background-color:#262730; padding:15px; border-radius:12px; border:1px solid #444; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
+                                    <img src="{img}" style="width:90px; height:90px; border-radius:50%; border: 2px solid #333; margin-bottom:10px; object-fit: cover;" onerror="this.onerror=null; this.src='https://cdn.nba.com/headshots/nba/latest/1040x760/fallback.png'">
+                                    <div style="font-weight:bold; font-size:1.1em; margin-bottom:5px;">{player.PLAYER_NAME}</div>
+                                    {status_html}
+                                    <div style="display:flex; justify-content:space-between; background:#1e1e24; padding:8px 12px; border-radius:6px; margin-top:8px;">
+                                        <span style="color:#ddd;">💰 ${int(player.Salary)}</span>
+                                        <span style="color:#fff; font-weight:bold;">📊 {player.Proj_DK_PTS:.1f}</span>
+                                    </div>
+                                    <div style="color: {color}; font-size:1.4em; font-weight:800; margin-top:10px;">
+                                        {player.Value:.1f}x <span style="font-size:0.6em; font-weight:normal; color:#aaa;">VAL</span>
+                                    </div>
+                                </div>
+                            """)
                             st.markdown(card_html, unsafe_allow_html=True)
 
                         st.markdown("### 🏆 Top 3 Projected Scorers")
@@ -317,7 +330,7 @@ if run_btn:
                             
                             def color_injury(val):
                                 if 'Out' in str(val) or 'Doubtful' in str(val): return 'color: #FF5252; font-weight: bold'
-                                elif 'Questionable' in str(val): return 'color: #FFC107; font-weight: bold'
+                                elif 'Questionable' in str(val) or 'Day' in str(val): return 'color: #FFC107; font-weight: bold'
                                 return ''
 
                             st.dataframe(show_df.style.format({'Salary': '${:.0f}', 'Proj_DK_PTS': '{:.1f}', 'Value': '{:.2f}x', 'L5_DK_PTS': '{:.1f}'})

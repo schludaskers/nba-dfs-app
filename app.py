@@ -53,7 +53,6 @@ def smart_map_names(api_names, salary_names):
         if norm_api in salary_norm_map:
             mapping[api_name] = salary_norm_map[norm_api]
         else:
-            # Force first letter match + 90% similarity
             candidates = [n for n in salary_norm_list if n.startswith(norm_api[0])]
             matches = difflib.get_close_matches(norm_api, candidates, n=1, cutoff=0.90)
             if matches:
@@ -63,37 +62,50 @@ def smart_map_names(api_names, salary_names):
 @st.cache_data
 def get_injury_report():
     """
-    STRICT ESPN SCRAPER
-    - Grabs ALL tables from espn.com/nba/injuries
-    - forces Col 0 -> Player, Col 1 -> Status
+    SMART ESPN SCRAPER
+    - Searches for 'STATUS' column explicitly.
+    - Ignores 'POS' column.
     """
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     url = "https://www.espn.com/nba/injuries"
     
     try:
         response = requests.get(url, headers=headers, timeout=10)
-        # ESPN has 30 separate tables (one per team)
         dfs = pd.read_html(io.StringIO(response.text))
         
         all_injuries = []
         for df in dfs:
-            # Basic validation: Table must have at least 2 columns (Name, Status)
-            if len(df.columns) >= 2:
-                # Force rename the first two columns regardless of what ESPN calls them
-                # This fixes issues where 'NAME' header is missing
-                clean_df = df.iloc[:, :2].copy()
+            # Ensure headers are strings and uppercase
+            df.columns = [str(c).upper() for c in df.columns]
+            
+            # 1. Look for 'NAME' and 'STATUS' columns explicitly
+            name_col = next((c for c in df.columns if 'NAME' in c or 'PLAYER' in c), None)
+            status_col = next((c for c in df.columns if 'STATUS' in c), None)
+            
+            # 2. If 'STATUS' column missing, check if it's the 3rd column (Name, Pos, Status)
+            # This is a fallback if headers are messed up
+            if not status_col and len(df.columns) >= 3:
+                # Check if Col 1 looks like Position (PG, SG, C)
+                sample_val = str(df.iloc[0, 1])
+                if sample_val in ['PG', 'SG', 'SF', 'PF', 'C']:
+                    # Then Column 2 is likely status
+                    clean_df = df.iloc[:, [0, 2]].copy()
+                    clean_df.columns = ['Player', 'Injury Status']
+                    all_injuries.append(clean_df)
+                    continue
+
+            # 3. Standard Header Match
+            if name_col and status_col:
+                clean_df = df[[name_col, status_col]].copy()
                 clean_df.columns = ['Player', 'Injury Status']
-                
-                # Filter out header rows that got scraped as data
+                # Clean up header rows that appear in data
                 clean_df = clean_df[clean_df['Player'] != 'NAME']
                 clean_df = clean_df[clean_df['Player'] != 'Player']
-                
                 all_injuries.append(clean_df)
         
         if all_injuries:
             combined = pd.concat(all_injuries)
             combined['Player_Norm'] = combined['Player'].apply(normalize_name)
-            # Standardize status text
             return combined[['Player_Norm', 'Injury Status']]
             
     except Exception as e:
@@ -204,11 +216,7 @@ if run_btn:
                     injury_df = get_injury_report()
                     
                     if not injury_df.empty:
-                        # Define what counts as "Injured" for exclusion
-                        # For display, we keep everything. For filtering, we look for Out/Doubtful.
                         status_map = dict(zip(injury_df['Player_Norm'], injury_df['Injury Status']))
-                        
-                        # Calculate count of strictly OUT players
                         exclude_mask = injury_df['Injury Status'].str.contains('Out|Doubtful|Injured Reserve', case=False, na=False)
                         injured_list_norm = injury_df[exclude_mask]['Player_Norm'].tolist()
                     else:
@@ -243,7 +251,7 @@ if run_btn:
 
                     if not slate.empty:
                         slate['Proj_DK_PTS'] = model.predict(slate[features])
-                        # Map injury status to the slate
+                        # IMPORTANT: Map the status so it shows up in the visuals
                         slate['Injury Status'] = slate['PLAYER_NAME_NORM'].map(status_map).fillna("")
 
                         if salary_file is not None:
@@ -261,6 +269,7 @@ if run_btn:
                                     
                                     slate = slate[slate['Salary'] > 0]
                                     
+                                    # GLITCH PREVENTION
                                     bad_match_mask = (slate['Proj_DK_PTS'] > 30) & (slate['Salary'] < 4000)
                                     if bad_match_mask.any():
                                         st.toast(f"⚠️ Removed {bad_match_mask.sum()} suspicious matches", icon="🧹")

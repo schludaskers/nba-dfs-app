@@ -30,7 +30,7 @@ st.markdown("""
         margin-bottom: 10px;
         text-align: center;
         position: relative;
-        height: 360px; /* STRICT FIXED HEIGHT */
+        height: 380px; /* Increased height slightly for extra data */
         width: 100%;
         box-sizing: border-box;
         padding: 12px;
@@ -75,7 +75,7 @@ st.markdown("""
 
     /* SECTION 2: INFO (Team, Opp, Status) */
     div.card-info {
-        flex: 1 1 auto; /* Grow to fill space */
+        flex: 1 1 auto;
         display: flex;
         flex-direction: column;
         justify-content: flex-start;
@@ -83,11 +83,20 @@ st.markdown("""
         color: #bbb;
     }
 
+    div.matchup-box {
+        background: #333;
+        border-radius: 4px;
+        padding: 4px;
+        margin: 6px 0;
+        font-size: 0.9em;
+        color: #eee;
+    }
+
     div.status-text {
         color: #FFC107; 
         font-size: 0.8em; 
-        min-height: 1.2em; /* Reserve space even if empty */
-        margin-top: 4px;
+        min-height: 1.2em; 
+        margin-top: 2px;
         white-space: nowrap; 
         overflow: hidden; 
         text-overflow: ellipsis;
@@ -96,7 +105,7 @@ st.markdown("""
     /* SECTION 3: FOOTER (Stats + Value) */
     div.card-footer {
         flex: 0 0 auto;
-        margin-top: auto; /* Push to bottom */
+        margin-top: auto; 
     }
 
     div.stat-row {
@@ -432,6 +441,7 @@ if run_btn:
                             ceil = player.get('Ceiling', 0); ceil = 0 if pd.isna(ceil) else ceil
                             opp = player.get('OPP_ABBREV', 'OPP'); opp = 'OPP' if pd.isna(opp) else opp
                             dvp = player.get('DvP_Rank', 0); dvp = 15 if pd.isna(dvp) else dvp
+                            h2h = player.get('H2H_Avg', 0); h2h = 0 if pd.isna(h2h) else h2h
                             
                             val_color = "#4CAF50" if val >= 5 else "#FFC107" if val >= 4 else "#F44336"
                             dvp_color = "#4CAF50" if dvp >= 20 else "#F44336" if dvp <= 10 else "#bbb"
@@ -449,9 +459,10 @@ if run_btn:
                                         <div class="player-name">{name}</div>
                                     </div>
                                     <div class="card-info">
-                                        <div>{pos} • Vs {opp} (<span style="color:{dvp_color}">DvP {int(dvp)}</span>)</div>
+                                        <div>{pos} • <span style="color:{dvp_color}">DvP {int(dvp)}</span></div>
+                                        <div class="matchup-box">Vs {opp}: <b>{h2h:.1f}</b> <span style="font-size:0.8em; color:#aaa">avg</span></div>
                                         <div class="status-text">{status}</div>
-                                        <div style="display:flex; justify-content:space-around; font-size:0.85em; color:#aaa; margin-top:5px;">
+                                        <div style="display:flex; justify-content:space-around; font-size:0.85em; color:#aaa; margin-top:auto;">
                                             <div>Floor: <b style="color:#ddd">{int(floor)}</b></div>
                                             <div>Ceil: <b style="color:#ddd">{int(ceil)}</b></div>
                                         </div>

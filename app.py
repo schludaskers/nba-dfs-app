@@ -73,11 +73,9 @@ def get_injury_report():
         dfs = pd.read_html(io.StringIO(response.text))
         all_injuries = []
         for df in dfs:
-            # Strategy 1: Check if 2nd col is Position (e.g. 'PG')
             if len(df.columns) >= 3:
                 sample_val = str(df.iloc[0, 1]).upper()
                 if sample_val in ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F']:
-                    # Likely [Name, Pos, Date, Status, Comment]
                     row_vals = [str(x).lower() for x in df.iloc[0].values]
                     status_idx = -1
                     for i, val in enumerate(row_vals):
@@ -90,7 +88,6 @@ def get_injury_report():
                     all_injuries.append(clean_df)
                     continue
 
-            # Strategy 2: Standard Headers
             df.columns = [str(c).upper() for c in df.columns]
             name_col = next((c for c in df.columns if 'NAME' in c or 'PLAYER' in c), None)
             status_col = next((c for c in df.columns if 'STATUS' in c), None)
@@ -155,14 +152,11 @@ def get_roster_data(team_ids):
 def get_usage_and_defense(season_str=None):
     """Loads static CSV files. SAFE MODE."""
     try:
-        # 1. Load Usage
         usage_df = pd.read_csv('nba_usage_2026.csv')
         usage_df['PLAYER_ID'] = usage_df['PLAYER_ID'].astype(str)
-        # Rename Name column so it doesn't overwrite Main DF Name
         if 'PLAYER_NAME' in usage_df.columns:
             usage_df = usage_df.rename(columns={'PLAYER_NAME': 'Usage_Name'})
 
-        # 2. Load Defense
         defense_df = pd.read_csv('nba_defense_2026.csv')
         defense_df['TEAM_ID'] = defense_df['TEAM_ID'].astype(str) 
 
@@ -197,6 +191,10 @@ def load_and_process_data(season_str):
     df['PLAYER_ID'] = df['PLAYER_ID'].astype(str)
     df['TEAM_ID'] = df['TEAM_ID'].astype(str)
     
+    # Clean Matchup to extract Opponent (e.g., "LAL @ BOS" -> "BOS")
+    # Matches: "LAL vs. BOS" or "LAL @ BOS"
+    df['OPPONENT'] = df['MATCHUP'].apply(lambda x: x.replace('@', 'vs.').split(' vs. ')[-1])
+
     df = df.sort_values(by=['PLAYER_ID', 'GAME_DATE'])
     df['MIN'] = pd.to_numeric(df['MIN'], errors='coerce')
     df['DK_PTS'] = df.apply(calculate_dk_points, axis=1)
@@ -207,6 +205,7 @@ def load_and_process_data(season_str):
     for col in stats:
         df[f'L5_{col}'] = df.groupby('PLAYER_ID')[col].transform(lambda x: x.shift(1).rolling(5, min_periods=1).mean())
         df[f'L10_{col}'] = df.groupby('PLAYER_ID')[col].transform(lambda x: x.shift(1).rolling(10, min_periods=1).mean())
+        
     return df.dropna()
 
 # --- 3. UI LAYOUT ---
@@ -267,20 +266,42 @@ if run_btn:
             
             usage_df, defense_df = get_usage_and_defense()
 
-            with st.spinner("Running XGBoost Model..."):
+            with st.spinner("Running XGBoost Model (Inc. H2H Stats)..."):
                 df = load_and_process_data(current_season_str)
                 
                 if not df.empty:
+                    # --- NEW: CALCULATE H2H HISTORY ---
+                    # Group by Player + Opponent to find average vs specific teams
+                    # We take the mean of the last 5 games against that specific opponent
+                    h2h_df = df.sort_values('GAME_DATE').groupby(['PLAYER_ID', 'OPPONENT'])['DK_PTS'].apply(lambda x: x.tail(5).mean()).reset_index()
+                    h2h_df.rename(columns={'DK_PTS': 'H2H_Avg'}, inplace=True)
+
+                    # Create Mapping for Team ID -> Abbreviation (needed to link schedule to history)
+                    team_id_to_abbrev = df[['TEAM_ID', 'TEAM_ABBREVIATION']].drop_duplicates().set_index('TEAM_ID')['TEAM_ABBREVIATION'].to_dict()
+
                     # XGBoost Training
+                    # We add 'H2H_Avg' to features later, but first we train on standard features
+                    # To properly train with H2H, we'd need to reconstruct the H2H history at every point in time. 
+                    # For speed/simplicity, we train on Form and *Merge* H2H as a booster feature for the projection.
                     features = ['L5_DK_PTS', 'L10_DK_PTS', 'L5_MIN', 'L10_MIN', 'DAYS_REST', 'L5_FGA', 'L10_FGA']
                     model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=150, learning_rate=0.1)
                     model.fit(df[features], df['DK_PTS'])
                     
-                    # Prepare Slate
+                    # Prepare Slate (Today's Players)
                     latest = df.groupby('PLAYER_ID').tail(1).copy()
                     latest['PLAYER_NAME_NORM'] = latest['PLAYER_NAME'].apply(normalize_name)
                     slate = latest[latest['PLAYER_ID'].isin(active_ids)].copy()
                     
+                    # --- ADD OPPONENT DATA ---
+                    slate['OPP_TEAM_ID'] = slate['TEAM_ID'].map(opponent_map)
+                    slate['OPP_ABBREV'] = slate['OPP_TEAM_ID'].map(team_id_to_abbrev)
+                    
+                    # --- MERGE H2H STATS ---
+                    # Find the specific H2H history for today's matchup
+                    slate = slate.merge(h2h_df, left_on=['PLAYER_ID', 'OPP_ABBREV'], right_on=['PLAYER_ID', 'OPPONENT'], how='left')
+                    # Fill missing H2H (if never played) with their standard L5 form
+                    slate['H2H_Avg'] = slate['H2H_Avg'].fillna(slate['L5_DK_PTS'])
+
                     # --- MERGES ---
                     if not roster_df.empty:
                         slate = slate.merge(roster_df, on='PLAYER_ID', how='left')
@@ -291,7 +312,6 @@ if run_btn:
                     else: 
                         slate['USG_PCT'] = 0.20
 
-                    slate['OPP_TEAM_ID'] = slate['TEAM_ID'].map(opponent_map)
                     if not defense_df.empty:
                         slate = slate.merge(defense_df, left_on='OPP_TEAM_ID', right_on='TEAM_ID', how='left')
                         slate['Def_Rank'] = slate['Def_Rank'].fillna(15)
@@ -302,13 +322,19 @@ if run_btn:
                         slate = slate[~slate['PLAYER_NAME_NORM'].isin(injured_list_norm)]
 
                     if not slate.empty:
-                        slate['Proj_DK_PTS'] = model.predict(slate[features])
+                        # Base Prediction from XGBoost
+                        slate['Base_Proj'] = model.predict(slate[features])
+                        
+                        # --- WEIGHTED PROJECTION ---
+                        # We blend the XGBoost (Form) with H2H History
+                        # 80% Model / 20% H2H (You can tune this)
+                        slate['Proj_DK_PTS'] = (slate['Base_Proj'] * 0.8) + (slate['H2H_Avg'] * 0.2)
+                        
                         slate['Injury Status'] = slate['PLAYER_NAME_NORM'].map(status_map).fillna("")
 
                         if salary_file is not None:
                             try:
                                 salaries = pd.read_csv(salary_file)
-                                # Fix DK column names if needed
                                 if 'Name' not in salaries.columns and 'Player Name' in salaries.columns:
                                     salaries = salaries.rename(columns={'Player Name': 'Name'})
                                     
@@ -328,20 +354,13 @@ if run_btn:
                         else: slate['Salary'] = 0; slate['Value'] = 0
 
                         # --- CREATE SECTIONS ---
-                        
-                        # 1. Top Scorers (Highest Projection)
                         slate = slate.sort_values(by='Proj_DK_PTS', ascending=False)
                         top_scorers = slate.head(3)
-
-                        # 2. Top Value (Proj > 18 & High Value)
                         top_value = slate[slate['Proj_DK_PTS'] > 18].sort_values(by='Value', ascending=False).head(3)
-
-                        # 3. Top Fades (Salary > 6000 & Low Value)
                         top_fades = slate[slate['Salary'] >= 6000].sort_values(by='Value', ascending=True).head(3)
 
                         # --- CARD DRAWING FUNCTION ---
                         def draw_card(player, label=None):
-                            # Safe Get function
                             def get_val(row, keys, default="UNK"):
                                 for k in keys:
                                     if k in row.index: return row[k]
@@ -356,6 +375,10 @@ if run_btn:
                             proj = player.get('Proj_DK_PTS', 0)
                             val = player.get('Value', 0)
                             
+                            # NEW: Get Opponent & H2H Avg
+                            opp = player.get('OPP_ABBREV', 'OPP')
+                            h2h = player.get('H2H_Avg', 0)
+                            
                             val_color = "#4CAF50" if val >= 5 else "#FFC107" if val >= 4 else "#F44336"
                             img = f"https://cdn.nba.com/headshots/nba/latest/1040x760/{pid}.png"
                             
@@ -368,7 +391,10 @@ if run_btn:
                                     <img src="{img}" style="width:90px; height:90px; border-radius:50%; border: 2px solid #333; margin-bottom:10px; object-fit: cover;" onerror="this.onerror=null; this.src='https://cdn.nba.com/headshots/nba/latest/1040x760/fallback.png'">
                                     <div style="font-weight:bold; font-size:1.1em; margin-bottom:5px;">{name} <span style="font-size:0.8em; color:#bbb;">({pos})</span></div>
                                     <div style="color:#FFC107; font-size:0.8em; margin-bottom:5px; height:15px;">{status}</div>
-                                    <div style="font-size:0.8em; color:#aaa; margin-bottom:5px;">Usage: {usg:.1f}%</div>
+                                    
+                                    <div style="font-size:0.8em; color:#aaa; margin-bottom:2px;">vs {opp}: <span style="color:#fff;">{h2h:.1f}</span></div>
+                                    <div style="font-size:0.8em; color:#aaa; margin-bottom:8px;">Usage: {usg:.1f}%</div>
+                                    
                                     <div style="display:flex; justify-content:space-between; background:#1e1e24; padding:8px 12px; border-radius:6px; margin-top:8px;">
                                         <span style="color:#ddd;">💰 ${int(sal)}</span>
                                         <span style="color:#fff; font-weight:bold;">📊 {proj:.1f}</span>
@@ -381,7 +407,6 @@ if run_btn:
                             )
 
                         # --- RENDER SECTIONS ---
-                        
                         st.markdown("### 🏆 Top 3 Projected Scorers")
                         c1, c2, c3 = st.columns(3)
                         for idx, col in enumerate([c1, c2, c3]):
@@ -394,21 +419,20 @@ if run_btn:
                             if idx < len(top_value): 
                                 with col: draw_card(top_value.iloc[idx], "💎 Value")
                                 
-                        st.markdown("### 📉 Top 3 Fades (Avoid - High Salary, Low Value)")
+                        st.markdown("### 📉 Top 3 Fades (Avoid)")
                         c1, c2, c3 = st.columns(3)
                         for idx, col in enumerate([c1, c2, c3]):
                             if idx < len(top_fades): 
                                 with col: draw_card(top_fades.iloc[idx], "🛑 Fade")
 
                         st.markdown("---")
-                        # --- REMOVED TEAMS TAB ---
                         tab1, tab2 = st.tabs(["📋 Rankings", "🛠️ Debug"])
                         
                         with tab1:
-                            cols = ['PLAYER_NAME', 'POSITION', 'TEAM_ABBREVIATION', 'Injury Status', 'Def_Rank', 'USG_PCT', 'Salary', 'Proj_DK_PTS', 'Value']
+                            cols = ['PLAYER_NAME', 'POSITION', 'TEAM_ABBREVIATION', 'OPP_ABBREV', 'Injury Status', 'Def_Rank', 'H2H_Avg', 'Salary', 'Proj_DK_PTS', 'Value']
                             valid_cols = [c for c in cols if c in slate.columns]
                             st.dataframe(slate[valid_cols].sort_values('Value', ascending=False)
-                                         .style.format({'Salary': '${:.0f}', 'Proj_DK_PTS': '{:.1f}', 'Value': '{:.2f}x', 'USG_PCT': '{:.1%}', 'Def_Rank': '{:.0f}'})
+                                         .style.format({'Salary': '${:.0f}', 'Proj_DK_PTS': '{:.1f}', 'H2H_Avg': '{:.1f}', 'Value': '{:.2f}x', 'Def_Rank': '{:.0f}'})
                                          .background_gradient(subset=['Value'], cmap='RdYlGn', vmin=3, vmax=6))
                         
                         with tab2:

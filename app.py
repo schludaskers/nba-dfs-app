@@ -21,27 +21,96 @@ st.set_page_config(
 st.markdown("""
     <style>
     .stApp { background-color: #0e1117; color: #fafafa; }
-    .game-card { background-color: #1f2026; padding: 10px; border-radius: 5px; margin-bottom: 8px; border-left: 4px solid #ff4b4b; font-size: 0.9em; }
-    h1, h2, h3 { color: #ff4b4b !important; }
     
-    /* UNIFIED CARD STYLING */
+    /* STRICT CARD LAYOUT */
     div.player-card {
         background-color: #262730; 
-        padding: 15px; 
         border-radius: 12px; 
         border: 1px solid #444; 
         margin-bottom: 10px;
         text-align: center;
         position: relative;
-        height: 350px; /* Fixed Height */
+        height: 360px; /* STRICT FIXED HEIGHT */
+        width: 100%;
+        box-sizing: border-box;
+        padding: 12px;
         display: flex;
         flex-direction: column;
-        justify-content: space-between;
+    }
+    
+    div.player-card:hover {
+        border-color: #888;
+        transform: translateY(-2px);
         transition: transform 0.2s;
     }
-    div.player-card:hover {
-        transform: scale(1.02);
-        border-color: #666;
+
+    /* SECTION 1: HEADER (Image + Name) */
+    div.card-header {
+        flex: 0 0 auto;
+        margin-bottom: 5px;
+    }
+    
+    div.player-img-container {
+        width: 80px; 
+        height: 80px; 
+        margin: 0 auto 8px auto;
+    }
+    
+    div.player-img {
+        width: 100%; 
+        height: 100%; 
+        border-radius: 50%; 
+        border: 2px solid #333; 
+        object-fit: cover;
+    }
+
+    div.player-name {
+        font-weight: bold; 
+        font-size: 1.1em; 
+        white-space: nowrap; 
+        overflow: hidden; 
+        text-overflow: ellipsis;
+        max-width: 100%;
+    }
+
+    /* SECTION 2: INFO (Team, Opp, Status) */
+    div.card-info {
+        flex: 1 1 auto; /* Grow to fill space */
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-start;
+        font-size: 0.85em;
+        color: #bbb;
+    }
+
+    div.status-text {
+        color: #FFC107; 
+        font-size: 0.8em; 
+        min-height: 1.2em; /* Reserve space even if empty */
+        margin-top: 4px;
+        white-space: nowrap; 
+        overflow: hidden; 
+        text-overflow: ellipsis;
+    }
+
+    /* SECTION 3: FOOTER (Stats + Value) */
+    div.card-footer {
+        flex: 0 0 auto;
+        margin-top: auto; /* Push to bottom */
+    }
+
+    div.stat-row {
+        display: flex; 
+        justify-content: space-between; 
+        background: #1e1e24; 
+        padding: 6px 10px; 
+        border-radius: 6px;
+        margin-bottom: 8px;
+    }
+
+    div.value-box {
+        font-size: 1.4em; 
+        font-weight: 800;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -206,9 +275,7 @@ def load_and_process_data():
 
     stats = ['MIN', 'PTS', 'REB', 'AST', 'FGA', 'DK_PTS']
     for col in stats:
-        # Consistency Stats
         df[f'L10_STD_{col}'] = df.groupby('PLAYER_ID')[col].transform(lambda x: x.shift(1).rolling(10, min_periods=5).std())
-        # Average Stats
         df[f'L5_{col}'] = df.groupby('PLAYER_ID')[col].transform(lambda x: x.shift(1).rolling(5, min_periods=1).mean())
         df[f'L10_{col}'] = df.groupby('PLAYER_ID')[col].transform(lambda x: x.shift(1).rolling(10, min_periods=1).mean())
     return df.dropna()
@@ -289,7 +356,6 @@ if run_btn:
                     slate = latest[latest['PLAYER_ID'].isin(active_ids)].copy()
                     
                     # --- ADD CONSISTENCY STATS ---
-                    # Calculate Floor (Avg - StdDev) and Ceiling (Avg + StdDev)
                     slate['Std_Dev'] = slate['L10_STD_DK_PTS'].fillna(5)
                     slate['Floor'] = slate['L10_DK_PTS'] - slate['Std_Dev']
                     slate['Ceiling'] = slate['L10_DK_PTS'] + slate['Std_Dev']
@@ -308,12 +374,10 @@ if run_btn:
 
                     # DvP Logic
                     if not dvp_df.empty and 'POSITION' in slate.columns:
-                        # Normalize Position to match DVP buckets (Simple Map)
                         def get_pos_bucket(p):
                             if 'C' in str(p): return 'C'
                             if 'F' in str(p): return 'PF'
                             return 'PG'
-                        
                         slate['Pos_Bucket'] = slate['POSITION'].apply(get_pos_bucket)
                         slate = slate.merge(dvp_df, left_on=['OPP_ABBREV', 'Pos_Bucket'], right_on=['OPPONENT', 'Pos_Bucket'], how='left')
                         slate['DvP_Rank'] = slate['DvP_Rank'].fillna(15) 
@@ -324,11 +388,7 @@ if run_btn:
 
                     if not slate.empty:
                         slate['Base_Proj'] = model.predict(slate[features])
-                        
-                        # Weighting: 80% Model, 10% H2H, 10% DvP (Boost for bad defense)
-                        # DvP Factor: Rank 30 = 1.1x boost, Rank 1 = 0.9x penalty
-                        slate['DvP_Factor'] = 0.9 + (slate['DvP_Rank'] / 150) # Approx range 0.9 - 1.1
-                        
+                        slate['DvP_Factor'] = 0.9 + (slate['DvP_Rank'] / 150) 
                         slate['Proj_DK_PTS'] = (slate['Base_Proj'] * 0.8) + (slate['H2H_Avg'] * 0.2)
                         slate['Proj_DK_PTS'] = slate['Proj_DK_PTS'] * slate['DvP_Factor']
                         
@@ -365,47 +425,43 @@ if run_btn:
                             pos = player.get('POSITION', 'UNK')
                             status = player.get('Injury Status', '')
                             
-                            # Safe Checks (Convert NaN to 0)
                             sal = player.get('Salary', 0); sal = 0 if pd.isna(sal) else sal
                             proj = player.get('Proj_DK_PTS', 0); proj = 0 if pd.isna(proj) else proj
                             val = player.get('Value', 0); val = 0 if pd.isna(val) else val
-                            
                             floor = player.get('Floor', 0); floor = 0 if pd.isna(floor) else floor
                             ceil = player.get('Ceiling', 0); ceil = 0 if pd.isna(ceil) else ceil
-                            
                             opp = player.get('OPP_ABBREV', 'OPP'); opp = 'OPP' if pd.isna(opp) else opp
                             dvp = player.get('DvP_Rank', 0); dvp = 15 if pd.isna(dvp) else dvp
                             
                             val_color = "#4CAF50" if val >= 5 else "#FFC107" if val >= 4 else "#F44336"
                             dvp_color = "#4CAF50" if dvp >= 20 else "#F44336" if dvp <= 10 else "#bbb"
-                            
                             img = f"https://cdn.nba.com/headshots/nba/latest/1040x760/{pid}.png"
                             label_html = f"<div style='position:absolute; top:5px; right:5px; background:#333; padding:2px 6px; border-radius:4px; font-size:0.7em; color:#ddd;'>{label}</div>" if label else ""
 
                             st.markdown(
                                 f"""
                                 <div class="player-card">
-                                    {label_html}
-                                    <div style="display:flex; justify-content:center;">
-                                        <img src="{img}" style="width:75px; height:75px; border-radius:50%; border: 2px solid #333; object-fit: cover;" onerror="this.onerror=null; this.src='https://cdn.nba.com/headshots/nba/latest/1040x760/fallback.png'">
+                                    <div class="card-header">
+                                        {label_html}
+                                        <div class="player-img-container">
+                                            <img src="{img}" class="player-img" onerror="this.onerror=null; this.src='https://cdn.nba.com/headshots/nba/latest/1040x760/fallback.png'">
+                                        </div>
+                                        <div class="player-name">{name}</div>
                                     </div>
-                                    <div>
-                                        <div style="font-weight:bold; font-size:1.1em; margin-bottom:2px;">{name}</div>
-                                        <div style="font-size:0.8em; color:#bbb; margin-bottom:5px;">{pos} • Vs {opp} (<span style="color:{dvp_color}">DvP {int(dvp)}</span>)</div>
-                                        <div style="color:#FFC107; font-size:0.8em; min-height:15px; margin-bottom:5px;">{status}</div>
+                                    <div class="card-info">
+                                        <div>{pos} • Vs {opp} (<span style="color:{dvp_color}">DvP {int(dvp)}</span>)</div>
+                                        <div class="status-text">{status}</div>
+                                        <div style="display:flex; justify-content:space-around; font-size:0.85em; color:#aaa; margin-top:5px;">
+                                            <div>Floor: <b style="color:#ddd">{int(floor)}</b></div>
+                                            <div>Ceil: <b style="color:#ddd">{int(ceil)}</b></div>
+                                        </div>
                                     </div>
-                                    
-                                    <div style="display:flex; justify-content:space-around; font-size:0.75em; color:#aaa; margin-bottom:8px;">
-                                        <div>Floor: <b style="color:#ddd">{int(floor)}</b></div>
-                                        <div>Ceil: <b style="color:#ddd">{int(ceil)}</b></div>
-                                    </div>
-
-                                    <div>
-                                        <div style="display:flex; justify-content:space-between; background:#1e1e24; padding:6px 10px; border-radius:6px;">
+                                    <div class="card-footer">
+                                        <div class="stat-row">
                                             <span style="color:#ddd;">💰 ${int(sal)}</span>
                                             <span style="color:#fff; font-weight:bold;">📊 {proj:.1f}</span>
                                         </div>
-                                        <div style="color: {val_color}; font-size:1.3em; font-weight:800; margin-top:6px;">
+                                        <div class="value-box" style="color: {val_color};">
                                             {val:.1f}x <span style="font-size:0.6em; font-weight:normal; color:#aaa;">VAL</span>
                                         </div>
                                     </div>
@@ -417,22 +473,19 @@ if run_btn:
                         c1, c2, c3 = st.columns(3)
                         for idx, col in enumerate([c1, c2, c3]):
                             if idx < len(top_scorers):
-                                with col:
-                                    draw_card(top_scorers.iloc[idx], "🔥 Top Scorer")
+                                with col: draw_card(top_scorers.iloc[idx], "🔥 Top Scorer")
 
                         st.markdown("### 💰 Top 3 Value Plays (Best ROI)")
                         c1, c2, c3 = st.columns(3)
                         for idx, col in enumerate([c1, c2, c3]):
                             if idx < len(top_value):
-                                with col:
-                                    draw_card(top_value.iloc[idx], "💎 Value")
+                                with col: draw_card(top_value.iloc[idx], "💎 Value")
                                 
                         st.markdown("### 📉 Top 3 Fades (Avoid)")
                         c1, c2, c3 = st.columns(3)
                         for idx, col in enumerate([c1, c2, c3]):
                             if idx < len(top_fades):
-                                with col:
-                                    draw_card(top_fades.iloc[idx], "🛑 Fade")
+                                with col: draw_card(top_fades.iloc[idx], "🛑 Fade")
 
                         st.markdown("---")
                         tab1, tab2, tab3 = st.tabs(["📋 Rankings", "📈 Value Chart", "🛠️ Debug"])
@@ -446,15 +499,8 @@ if run_btn:
                                          .background_gradient(subset=['DvP_Rank'], cmap='RdYlGn', vmin=1, vmax=30))
                         
                         with tab2:
-                            # Scatter Plot
                             if 'Salary' in slate.columns and 'Proj_DK_PTS' in slate.columns:
-                                st.scatter_chart(
-                                    slate,
-                                    x='Salary',
-                                    y='Proj_DK_PTS',
-                                    color='POSITION',
-                                    size='Value'
-                                )
+                                st.scatter_chart(slate, x='Salary', y='Proj_DK_PTS', color='POSITION', size='Value')
                                 st.caption("Size of bubble = Value (Points per $)")
 
                         with tab3:

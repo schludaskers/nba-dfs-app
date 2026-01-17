@@ -24,6 +24,7 @@ st.markdown("""
     .game-card { background-color: #1f2026; padding: 10px; border-radius: 5px; margin-bottom: 8px; border-left: 4px solid #ff4b4b; font-size: 0.9em; }
     h1, h2, h3 { color: #ff4b4b !important; }
     
+    /* UNIFIED CARD STYLING */
     div.player-card {
         background-color: #262730; 
         padding: 15px; 
@@ -32,7 +33,7 @@ st.markdown("""
         margin-bottom: 10px;
         text-align: center;
         position: relative;
-        height: 340px; 
+        height: 350px; /* Fixed Height */
         display: flex;
         flex-direction: column;
         justify-content: space-between;
@@ -315,7 +316,7 @@ if run_btn:
                         
                         slate['Pos_Bucket'] = slate['POSITION'].apply(get_pos_bucket)
                         slate = slate.merge(dvp_df, left_on=['OPP_ABBREV', 'Pos_Bucket'], right_on=['OPPONENT', 'Pos_Bucket'], how='left')
-                        slate['DvP_Rank'] = slate['DvP_Rank'].fillna(15) # Default mid-pack
+                        slate['DvP_Rank'] = slate['DvP_Rank'].fillna(15) 
                     else: 
                         slate['DvP_Rank'] = 15
 
@@ -362,16 +363,18 @@ if run_btn:
                             name = player.get('PLAYER_NAME', 'Unknown')
                             pid = player.get('PLAYER_ID', '')
                             pos = player.get('POSITION', 'UNK')
-                            status = player.get('Injury Status', '') if pd.notna(player.get('Injury Status')) else ''
+                            status = player.get('Injury Status', '')
                             
-                            sal = player.get('Salary', 0) if pd.notna(player.get('Salary')) else 0
-                            proj = player.get('Proj_DK_PTS', 0) if pd.notna(player.get('Proj_DK_PTS')) else 0
-                            val = player.get('Value', 0) if pd.notna(player.get('Value')) else 0
-                            floor = player.get('Floor', 0) if pd.notna(player.get('Floor')) else 0
-                            ceil = player.get('Ceiling', 0) if pd.notna(player.get('Ceiling')) else 0
+                            # Safe Checks (Convert NaN to 0)
+                            sal = player.get('Salary', 0); sal = 0 if pd.isna(sal) else sal
+                            proj = player.get('Proj_DK_PTS', 0); proj = 0 if pd.isna(proj) else proj
+                            val = player.get('Value', 0); val = 0 if pd.isna(val) else val
                             
-                            opp = player.get('OPP_ABBREV', 'OPP') if pd.notna(player.get('OPP_ABBREV')) else 'OPP'
-                            dvp = player.get('DvP_Rank', 0) if pd.notna(player.get('DvP_Rank')) else 15
+                            floor = player.get('Floor', 0); floor = 0 if pd.isna(floor) else floor
+                            ceil = player.get('Ceiling', 0); ceil = 0 if pd.isna(ceil) else ceil
+                            
+                            opp = player.get('OPP_ABBREV', 'OPP'); opp = 'OPP' if pd.isna(opp) else opp
+                            dvp = player.get('DvP_Rank', 0); dvp = 15 if pd.isna(dvp) else dvp
                             
                             val_color = "#4CAF50" if val >= 5 else "#FFC107" if val >= 4 else "#F44336"
                             dvp_color = "#4CAF50" if dvp >= 20 else "#F44336" if dvp <= 10 else "#bbb"
@@ -443,7 +446,7 @@ if run_btn:
                                          .background_gradient(subset=['DvP_Rank'], cmap='RdYlGn', vmin=1, vmax=30))
                         
                         with tab2:
-                            # Scatter Plot: Salary vs Proj Points
+                            # Scatter Plot
                             if 'Salary' in slate.columns and 'Proj_DK_PTS' in slate.columns:
                                 st.scatter_chart(
                                     slate,

@@ -30,7 +30,7 @@ st.markdown("""
         margin-bottom: 10px;
         text-align: center;
         position: relative;
-        height: 380px; /* Increased height slightly for extra data */
+        height: 380px; 
         width: 100%;
         box-sizing: border-box;
         padding: 12px;
@@ -44,7 +44,7 @@ st.markdown("""
         transition: transform 0.2s;
     }
 
-    /* SECTION 1: HEADER (Image + Name) */
+    /* HEADER */
     div.card-header {
         flex: 0 0 auto;
         margin-bottom: 5px;
@@ -73,7 +73,7 @@ st.markdown("""
         max-width: 100%;
     }
 
-    /* SECTION 2: INFO (Team, Opp, Status) */
+    /* INFO */
     div.card-info {
         flex: 1 1 auto;
         display: flex;
@@ -102,7 +102,7 @@ st.markdown("""
         text-overflow: ellipsis;
     }
 
-    /* SECTION 3: FOOTER (Stats + Value) */
+    /* FOOTER */
     div.card-footer {
         flex: 0 0 auto;
         margin-top: auto; 
@@ -502,10 +502,11 @@ if run_btn:
                         tab1, tab2, tab3 = st.tabs(["📋 Rankings", "📈 Value Chart", "🛠️ Debug"])
                         
                         with tab1:
-                            cols = ['PLAYER_NAME', 'POSITION', 'OPP_ABBREV', 'Injury Status', 'DvP_Rank', 'Floor', 'Ceiling', 'Salary', 'Proj_DK_PTS', 'Value']
+                            # ADDED 'H2H_Avg' to column list
+                            cols = ['PLAYER_NAME', 'POSITION', 'OPP_ABBREV', 'Injury Status', 'H2H_Avg', 'DvP_Rank', 'Floor', 'Ceiling', 'Salary', 'Proj_DK_PTS', 'Value']
                             valid_cols = [c for c in cols if c in slate.columns]
                             st.dataframe(slate[valid_cols].sort_values('Value', ascending=False)
-                                         .style.format({'Salary': '${:.0f}', 'Proj_DK_PTS': '{:.1f}', 'Floor': '{:.0f}', 'Ceiling': '{:.0f}', 'Value': '{:.2f}x', 'DvP_Rank': '{:.0f}'})
+                                         .style.format({'Salary': '${:.0f}', 'Proj_DK_PTS': '{:.1f}', 'Floor': '{:.0f}', 'Ceiling': '{:.0f}', 'Value': '{:.2f}x', 'DvP_Rank': '{:.0f}', 'H2H_Avg': '{:.1f}'})
                                          .background_gradient(subset=['Value'], cmap='RdYlGn', vmin=3, vmax=6)
                                          .background_gradient(subset=['DvP_Rank'], cmap='RdYlGn', vmin=1, vmax=30))
                         

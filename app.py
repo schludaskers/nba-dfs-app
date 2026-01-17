@@ -389,17 +389,23 @@ if run_btn:
                         st.markdown("### 🏆 Top 3 Projected Scorers")
                         c1, c2, c3 = st.columns(3)
                         for idx, col in enumerate([c1, c2, c3]):
-                            if idx < len(top_scorers): with col: draw_card(top_scorers.iloc[idx], "🔥 Top Scorer")
+                            if idx < len(top_scorers):
+                                with col:
+                                    draw_card(top_scorers.iloc[idx], "🔥 Top Scorer")
 
                         st.markdown("### 💰 Top 3 Value Plays (Best ROI)")
                         c1, c2, c3 = st.columns(3)
                         for idx, col in enumerate([c1, c2, c3]):
-                            if idx < len(top_value): with col: draw_card(top_value.iloc[idx], "💎 Value")
+                            if idx < len(top_value):
+                                with col:
+                                    draw_card(top_value.iloc[idx], "💎 Value")
                                 
                         st.markdown("### 📉 Top 3 Fades (Avoid)")
                         c1, c2, c3 = st.columns(3)
                         for idx, col in enumerate([c1, c2, c3]):
-                            if idx < len(top_fades): with col: draw_card(top_fades.iloc[idx], "🛑 Fade")
+                            if idx < len(top_fades):
+                                with col:
+                                    draw_card(top_fades.iloc[idx], "🛑 Fade")
 
                         st.markdown("---")
                         tab1, tab2 = st.tabs(["📋 Rankings", "🛠️ Debug"])

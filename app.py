@@ -24,7 +24,6 @@ st.markdown("""
     .game-card { background-color: #1f2026; padding: 10px; border-radius: 5px; margin-bottom: 8px; border-left: 4px solid #ff4b4b; font-size: 0.9em; }
     h1, h2, h3 { color: #ff4b4b !important; }
     
-    /* UNIFIED CARD STYLING */
     div.player-card {
         background-color: #262730; 
         padding: 15px; 
@@ -33,7 +32,7 @@ st.markdown("""
         margin-bottom: 10px;
         text-align: center;
         position: relative;
-        height: 320px; /* Fixed Height for Alignment */
+        height: 340px; 
         display: flex;
         flex-direction: column;
         justify-content: space-between;
@@ -156,17 +155,27 @@ def get_roster_data(team_ids):
     if all_rosters: return pd.concat(all_rosters)
     return pd.DataFrame(columns=['PLAYER_ID', 'POSITION'])
 
-def get_usage_and_defense():
+def get_static_data():
+    usage_df = pd.DataFrame()
+    defense_df = pd.DataFrame()
+    dvp_df = pd.DataFrame()
+    
     try:
         usage_df = pd.read_csv('nba_usage_2026.csv')
         usage_df['PLAYER_ID'] = usage_df['PLAYER_ID'].astype(str)
-        if 'PLAYER_NAME' in usage_df.columns:
-            usage_df = usage_df.rename(columns={'PLAYER_NAME': 'Usage_Name'})
+        if 'PLAYER_NAME' in usage_df.columns: usage_df = usage_df.rename(columns={'PLAYER_NAME': 'Usage_Name'})
+    except: pass
 
+    try:
         defense_df = pd.read_csv('nba_defense_2026.csv')
-        defense_df['TEAM_ID'] = defense_df['TEAM_ID'].astype(str) 
-        return usage_df, defense_df
-    except: return pd.DataFrame(), pd.DataFrame()
+        defense_df['TEAM_ID'] = defense_df['TEAM_ID'].astype(str)
+    except: pass
+
+    try:
+        dvp_df = pd.read_csv('nba_dvp.csv')
+    except: pass
+    
+    return usage_df, defense_df, dvp_df
 
 def calculate_dk_points(row):
     score = (row['PTS']) + (row['FG3M'] * 0.5) + (row['REB'] * 1.25) + (row['AST'] * 1.5) + (row['STL'] * 2) + (row['BLK'] * 2) - (row['TOV'] * 0.5)
@@ -196,6 +205,9 @@ def load_and_process_data():
 
     stats = ['MIN', 'PTS', 'REB', 'AST', 'FGA', 'DK_PTS']
     for col in stats:
+        # Consistency Stats
+        df[f'L10_STD_{col}'] = df.groupby('PLAYER_ID')[col].transform(lambda x: x.shift(1).rolling(10, min_periods=5).std())
+        # Average Stats
         df[f'L5_{col}'] = df.groupby('PLAYER_ID')[col].transform(lambda x: x.shift(1).rolling(5, min_periods=1).mean())
         df[f'L10_{col}'] = df.groupby('PLAYER_ID')[col].transform(lambda x: x.shift(1).rolling(10, min_periods=1).mean())
     return df.dropna()
@@ -253,7 +265,7 @@ if run_btn:
             
             with status3: st.metric("Model Status", "XGBoost Active")
             
-            usage_df, defense_df = get_usage_and_defense()
+            usage_df, defense_df, dvp_df = get_static_data()
 
             with st.spinner("Loading Stats & Running Model..."):
                 df = load_and_process_data()
@@ -275,6 +287,12 @@ if run_btn:
                     latest['PLAYER_NAME_NORM'] = latest['PLAYER_NAME'].apply(normalize_name)
                     slate = latest[latest['PLAYER_ID'].isin(active_ids)].copy()
                     
+                    # --- ADD CONSISTENCY STATS ---
+                    # Calculate Floor (Avg - StdDev) and Ceiling (Avg + StdDev)
+                    slate['Std_Dev'] = slate['L10_STD_DK_PTS'].fillna(5)
+                    slate['Floor'] = slate['L10_DK_PTS'] - slate['Std_Dev']
+                    slate['Ceiling'] = slate['L10_DK_PTS'] + slate['Std_Dev']
+
                     # Merges
                     slate['OPP_TEAM_ID'] = slate['TEAM_ID'].map(opponent_map)
                     slate['OPP_ABBREV'] = slate['OPP_TEAM_ID'].map(team_id_to_abbrev)
@@ -287,16 +305,32 @@ if run_btn:
                         slate['USG_PCT'] = slate['USG_PCT'].fillna(0.20)
                     else: slate['USG_PCT'] = 0.20
 
-                    if not defense_df.empty:
-                        slate = slate.merge(defense_df, left_on='OPP_TEAM_ID', right_on='TEAM_ID', how='left')
-                        slate['Def_Rank'] = slate['Def_Rank'].fillna(15)
-                    else: slate['Def_Rank'] = 15
+                    # DvP Logic
+                    if not dvp_df.empty and 'POSITION' in slate.columns:
+                        # Normalize Position to match DVP buckets (Simple Map)
+                        def get_pos_bucket(p):
+                            if 'C' in str(p): return 'C'
+                            if 'F' in str(p): return 'PF'
+                            return 'PG'
+                        
+                        slate['Pos_Bucket'] = slate['POSITION'].apply(get_pos_bucket)
+                        slate = slate.merge(dvp_df, left_on=['OPP_ABBREV', 'Pos_Bucket'], right_on=['OPPONENT', 'Pos_Bucket'], how='left')
+                        slate['DvP_Rank'] = slate['DvP_Rank'].fillna(15) # Default mid-pack
+                    else: 
+                        slate['DvP_Rank'] = 15
 
                     if not show_injured: slate = slate[~slate['PLAYER_NAME_NORM'].isin(injured_list_norm)]
 
                     if not slate.empty:
                         slate['Base_Proj'] = model.predict(slate[features])
-                        slate['Proj_DK_PTS'] = (slate['Base_Proj'] * 0.85) + (slate['H2H_Avg'] * 0.15)
+                        
+                        # Weighting: 80% Model, 10% H2H, 10% DvP (Boost for bad defense)
+                        # DvP Factor: Rank 30 = 1.1x boost, Rank 1 = 0.9x penalty
+                        slate['DvP_Factor'] = 0.9 + (slate['DvP_Rank'] / 150) # Approx range 0.9 - 1.1
+                        
+                        slate['Proj_DK_PTS'] = (slate['Base_Proj'] * 0.8) + (slate['H2H_Avg'] * 0.2)
+                        slate['Proj_DK_PTS'] = slate['Proj_DK_PTS'] * slate['DvP_Factor']
+                        
                         slate['Injury Status'] = slate['PLAYER_NAME_NORM'].map(status_map).fillna("")
 
                         if salary_file is not None:
@@ -325,36 +359,23 @@ if run_btn:
 
                         # --- ROBUST CARD DRAWING ---
                         def draw_card(player, label=None):
-                            # Ensure inputs are safe
                             name = player.get('PLAYER_NAME', 'Unknown')
                             pid = player.get('PLAYER_ID', '')
                             pos = player.get('POSITION', 'UNK')
-                            if pd.isna(pos): pos = 'UNK'
+                            status = player.get('Injury Status', '') if pd.notna(player.get('Injury Status')) else ''
                             
-                            status = player.get('Injury Status', '')
-                            if pd.isna(status): status = ''
+                            sal = player.get('Salary', 0) if pd.notna(player.get('Salary')) else 0
+                            proj = player.get('Proj_DK_PTS', 0) if pd.notna(player.get('Proj_DK_PTS')) else 0
+                            val = player.get('Value', 0) if pd.notna(player.get('Value')) else 0
+                            floor = player.get('Floor', 0) if pd.notna(player.get('Floor')) else 0
+                            ceil = player.get('Ceiling', 0) if pd.notna(player.get('Ceiling')) else 0
                             
-                            # Safely handle Numbers (Convert NaNs to 0)
-                            usg = player.get('USG_PCT', 0.2)
-                            if pd.isna(usg): usg = 0.2
-                            usg_val = usg * 100
-                            
-                            sal = player.get('Salary', 0)
-                            if pd.isna(sal): sal = 0
-                            
-                            proj = player.get('Proj_DK_PTS', 0)
-                            if pd.isna(proj): proj = 0
-                            
-                            val = player.get('Value', 0)
-                            if pd.isna(val): val = 0
-                            
-                            opp = player.get('OPP_ABBREV', 'OPP')
-                            if pd.isna(opp): opp = 'OPP'
-                            
-                            h2h = player.get('H2H_Avg', 0)
-                            if pd.isna(h2h): h2h = 0
+                            opp = player.get('OPP_ABBREV', 'OPP') if pd.notna(player.get('OPP_ABBREV')) else 'OPP'
+                            dvp = player.get('DvP_Rank', 0) if pd.notna(player.get('DvP_Rank')) else 15
                             
                             val_color = "#4CAF50" if val >= 5 else "#FFC107" if val >= 4 else "#F44336"
+                            dvp_color = "#4CAF50" if dvp >= 20 else "#F44336" if dvp <= 10 else "#bbb"
+                            
                             img = f"https://cdn.nba.com/headshots/nba/latest/1040x760/{pid}.png"
                             label_html = f"<div style='position:absolute; top:5px; right:5px; background:#333; padding:2px 6px; border-radius:4px; font-size:0.7em; color:#ddd;'>{label}</div>" if label else ""
 
@@ -363,22 +384,25 @@ if run_btn:
                                 <div class="player-card">
                                     {label_html}
                                     <div style="display:flex; justify-content:center;">
-                                        <img src="{img}" style="width:80px; height:80px; border-radius:50%; border: 2px solid #333; object-fit: cover;" onerror="this.onerror=null; this.src='https://cdn.nba.com/headshots/nba/latest/1040x760/fallback.png'">
+                                        <img src="{img}" style="width:75px; height:75px; border-radius:50%; border: 2px solid #333; object-fit: cover;" onerror="this.onerror=null; this.src='https://cdn.nba.com/headshots/nba/latest/1040x760/fallback.png'">
                                     </div>
                                     <div>
                                         <div style="font-weight:bold; font-size:1.1em; margin-bottom:2px;">{name}</div>
-                                        <div style="font-size:0.8em; color:#bbb; margin-bottom:5px;">{pos}</div>
+                                        <div style="font-size:0.8em; color:#bbb; margin-bottom:5px;">{pos} • Vs {opp} (<span style="color:{dvp_color}">DvP {int(dvp)}</span>)</div>
                                         <div style="color:#FFC107; font-size:0.8em; min-height:15px; margin-bottom:5px;">{status}</div>
                                     </div>
-                                    <div style="background:#333; border-radius:4px; padding:4px; margin-bottom:8px; font-size:0.8em;">
-                                        <span style="color:#aaa;">Vs {opp}:</span> <span style="color:#fff; font-weight:bold;">{h2h:.1f}</span>
+                                    
+                                    <div style="display:flex; justify-content:space-around; font-size:0.75em; color:#aaa; margin-bottom:8px;">
+                                        <div>Floor: <b style="color:#ddd">{int(floor)}</b></div>
+                                        <div>Ceil: <b style="color:#ddd">{int(ceil)}</b></div>
                                     </div>
+
                                     <div>
-                                        <div style="display:flex; justify-content:space-between; background:#1e1e24; padding:8px 12px; border-radius:6px;">
+                                        <div style="display:flex; justify-content:space-between; background:#1e1e24; padding:6px 10px; border-radius:6px;">
                                             <span style="color:#ddd;">💰 ${int(sal)}</span>
                                             <span style="color:#fff; font-weight:bold;">📊 {proj:.1f}</span>
                                         </div>
-                                        <div style="color: {val_color}; font-size:1.4em; font-weight:800; margin-top:8px;">
+                                        <div style="color: {val_color}; font-size:1.3em; font-weight:800; margin-top:6px;">
                                             {val:.1f}x <span style="font-size:0.6em; font-weight:normal; color:#aaa;">VAL</span>
                                         </div>
                                     </div>
@@ -408,17 +432,31 @@ if run_btn:
                                     draw_card(top_fades.iloc[idx], "🛑 Fade")
 
                         st.markdown("---")
-                        tab1, tab2 = st.tabs(["📋 Rankings", "🛠️ Debug"])
+                        tab1, tab2, tab3 = st.tabs(["📋 Rankings", "📈 Value Chart", "🛠️ Debug"])
                         
                         with tab1:
-                            cols = ['PLAYER_NAME', 'POSITION', 'TEAM_ABBREVIATION', 'OPP_ABBREV', 'Injury Status', 'Def_Rank', 'H2H_Avg', 'Salary', 'Proj_DK_PTS', 'Value']
+                            cols = ['PLAYER_NAME', 'POSITION', 'OPP_ABBREV', 'Injury Status', 'DvP_Rank', 'Floor', 'Ceiling', 'Salary', 'Proj_DK_PTS', 'Value']
                             valid_cols = [c for c in cols if c in slate.columns]
                             st.dataframe(slate[valid_cols].sort_values('Value', ascending=False)
-                                         .style.format({'Salary': '${:.0f}', 'Proj_DK_PTS': '{:.1f}', 'H2H_Avg': '{:.1f}', 'Value': '{:.2f}x', 'Def_Rank': '{:.0f}'})
-                                         .background_gradient(subset=['Value'], cmap='RdYlGn', vmin=3, vmax=6))
+                                         .style.format({'Salary': '${:.0f}', 'Proj_DK_PTS': '{:.1f}', 'Floor': '{:.0f}', 'Ceiling': '{:.0f}', 'Value': '{:.2f}x', 'DvP_Rank': '{:.0f}'})
+                                         .background_gradient(subset=['Value'], cmap='RdYlGn', vmin=3, vmax=6)
+                                         .background_gradient(subset=['DvP_Rank'], cmap='RdYlGn', vmin=1, vmax=30))
                         
                         with tab2:
+                            # Scatter Plot: Salary vs Proj Points
+                            if 'Salary' in slate.columns and 'Proj_DK_PTS' in slate.columns:
+                                st.scatter_chart(
+                                    slate,
+                                    x='Salary',
+                                    y='Proj_DK_PTS',
+                                    color='POSITION',
+                                    size='Value'
+                                )
+                                st.caption("Size of bubble = Value (Points per $)")
+
+                        with tab3:
                             st.write(f"Usage Rows: {len(usage_df)}")
                             st.write(f"Defense Rows: {len(defense_df)}")
+                            st.write(f"DvP Rows: {len(dvp_df)}")
                             st.write(slate.head())
                 else: st.error("❌ Stats file empty or not found.")
